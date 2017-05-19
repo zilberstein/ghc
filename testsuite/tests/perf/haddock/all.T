@@ -111,6 +111,7 @@ test('haddock.Cabal',
             # 2017-02-16: 23867276992  Better Lint for join points
             # 2017-02-17: 27784875792 (amd64/Linux) - Generalize kind of (->)
             # 2017-02-12: 18865432648 (amd64/Linux) - Type-indexed Typeable
+            # 2017-05-31: 18269309128 (amd64/Linux) - Faster checkFamInstConsistency 
             # 2017-06-16: 15717181064 (amd64/Linux) - Don't desugar for haddock
 
           ,(platform('i386-unknown-mingw32'), 3293415576, 5)
