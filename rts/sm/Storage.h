@@ -26,17 +26,6 @@ void freeStorage(bool free_heap);
 void storageAddCapabilities (uint32_t from, uint32_t to);
 
 /* -----------------------------------------------------------------------------
-   Should we GC?
-   -------------------------------------------------------------------------- */
-
-INLINE_HEADER
-bool doYouWantToGC(Capability *cap)
-{
-    return (cap->r.rCurrentNursery->link == NULL ||
-            g0->n_new_large_words >= large_alloc_lim);
-}
-
-/* -----------------------------------------------------------------------------
    The storage manager mutex
    -------------------------------------------------------------------------- */
 
@@ -74,6 +63,17 @@ void     resizeNurseries      (StgWord blocks);
 void     resizeNurseriesFixed (void);
 StgWord  countNurseryBlocks   (void);
 bool     getNewNursery        (Capability *cap);
+
+/* -----------------------------------------------------------------------------
+   Should we GC?
+   -------------------------------------------------------------------------- */
+
+INLINE_HEADER
+bool doYouWantToGC(Capability *cap)
+{
+    return ((cap->r.rCurrentNursery->link == NULL && !getNewNursery(cap)) ||
+            g0->n_new_large_words >= large_alloc_lim);
+}
 
 /* -----------------------------------------------------------------------------
    Allocation accounting
