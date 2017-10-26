@@ -1191,7 +1191,7 @@ lStmtsImplicits = hs_lstmts
     hs_stmt :: StmtLR Name idR (Located (body idR)) -> NameSet
     hs_stmt (BindStmt pat _ _ _ _) = lPatImplicits pat
     hs_stmt (ApplicativeStmt args _ _) = unionNameSets (map do_arg args)
-      where do_arg (_, ApplicativeArgOne pat _) = lPatImplicits pat
+      where do_arg (_, ApplicativeArgOne pat _ _) = lPatImplicits pat
             do_arg (_, ApplicativeArgMany stmts _ _) = hs_lstmts stmts
     hs_stmt (LetStmt binds)      = hs_local_binds (unLoc binds)
     hs_stmt (BodyStmt {})        = emptyNameSet
