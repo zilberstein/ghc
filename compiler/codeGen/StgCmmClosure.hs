@@ -367,10 +367,10 @@ dataConTagZ con = dataConTag con - fIRST_TAG
 
 tagForCon :: DynFlags -> DataCon -> DynTag
 tagForCon dflags con
-  | isSmallFamily dflags fam_size = con_tag + 1
+  | isSmallFamily dflags fam_size = con_tag
   | otherwise                     = 1
   where
-    con_tag  = dataConTagZ con
+    con_tag  = dataConTag con -- NB: 1-indexed
     fam_size = tyConFamilySize (dataConTyCon con)
 
 tagForArity :: DynFlags -> RepArity -> DynTag
