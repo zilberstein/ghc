@@ -1104,3 +1104,67 @@ test('MultiLayerModules',
      ],
      multimod_compile,
      ['MultiLayerModules', '-v0'])
+
+test('ManyConstructors',
+     [ compiler_stats_num_field('bytes allocated',
+          [(wordsize(64), 4246959352, 10),
+          # initial:    8130527160
+          # 2018-01-05: 4246959352  Lift constructor tag allocation out of a loop
+          ]),
+       pre_cmd('./genManyConstructors'),
+       extra_files(['genManyConstructors']),
+     ],
+     multimod_compile,
+     ['ManyConstructors', '-v0'])
+
+test('T13701',
+     [ compiler_stats_num_field('bytes allocated',
+          [(platform('x86_64-apple-darwin'), 2217187888, 10),
+           (platform('x86_64-unknown-linux'), 2133380768, 10),
+           # initial:     2511285600
+           # 2017-06-23:  2188045288    treat banged variable bindings as FunBinds
+           # 2017-07-11:  2187920960
+           # 2017-07-12:  2412223768    inconsistency between Ben's machine and Harbormaster?
+           # 2017-07-17:  2133380768    Resolved the issue causing the inconsistencies in this test
+          ]),
+       pre_cmd('./genT13701'),
+       extra_files(['genT13701']),
+     ],
+     multimod_compile,
+     ['T13701', '-v0'])
+
+test('T13719',
+     [ compiler_stats_num_field('bytes allocated',
+          [(wordsize(64), 5187889872, 10),
+          # initial:    49907410784
+          # 2017-05-31: 5187889872   Faster checkFamInstConsistency
+          ]),
+       pre_cmd('./genT13719'),
+       extra_files(['genT13719']),
+     ],
+     multimod_compile,
+     ['T13719', '-v0'])
+
+test('Naperian',
+     [ reqlib('vector'),
+       only_ways(['optasm']),
+       compiler_stats_num_field('bytes allocated',
+          [(platform('x86_64-unknown-mingw32'), 54116696, 10),
+           # 2017-12-24                       54116696 (x64/Windows) - Unknown
+          (wordsize(64), 2381935784, 10)])
+     ],
+     compile,
+     [''])
+
+test ('T9630',
+      [ compiler_stats_num_field('max_bytes_used', # Note [residency]
+          [(platform('x86_64-unknown-mingw32'),   39867088, 15),
+          # 2017-12-24:                     34171816 (x64/Windows)
+          (wordsize(64), 41568168, 15)
+          # initial:    56955240
+          # 2017-06-07: 41568168     Stop the specialiser generating loopy code
+          ]),
+      extra_clean(['T9630a.hi', 'T9630a.o'])
+      ],
+      multimod_compile,
+      ['T9630', '-v0 -O'])

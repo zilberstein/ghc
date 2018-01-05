@@ -895,6 +895,9 @@ tcIfaceDataCons tycon_name tycon tc_tybinders if_cons
     univ_tv_bndrs :: [TyVarBinder]
     univ_tv_bndrs = mkDataConUnivTyVarBinders tc_tybinders
 
+    tag_map :: NameEnv ConTag
+    tag_map = mkTyConTagMap tycon
+
     tc_con_decl (IfCon { ifConInfix = is_infix,
                          ifConExTvs = ex_bndrs,
                          ifConName = dc_name,
@@ -940,7 +943,7 @@ tcIfaceDataCons tycon_name tycon tc_tybinders if_cons
                        lbl_names
                        univ_tv_bndrs ex_tv_bndrs
                        eq_spec theta
-                       arg_tys orig_res_ty tycon
+                       arg_tys orig_res_ty tycon tag_map
         ; traceIf (text "Done interface-file tc_con_decl" <+> ppr dc_name)
         ; return con }
     mk_doc con_name = text "Constructor" <+> ppr con_name
