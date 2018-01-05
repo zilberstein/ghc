@@ -195,6 +195,7 @@ vectDataCon dc
        ; let ret_ty = mkFamilyTyConApp tycon' (mkTyVarTys univ_tvs)
        ; fam_envs  <- readGEnv global_fam_inst_env
        ; rep_nm    <- liftDs $ newTyConRepName name'
+       ; let tag_map = mkTyConTagMap tycon'
        ; liftDs $ buildDataCon fam_envs
                     name'
                     (dataConIsInfix dc)            -- infix if the original is
@@ -209,6 +210,7 @@ vectDataCon dc
                     arg_tys                        -- argument types
                     ret_ty                         -- return type
                     tycon'                         -- representation tycon
+                    tag_map
        }
   where
     name        = dataConName dc
