@@ -1742,7 +1742,7 @@ emitFunDepDeriveds fd_eqns
      = do { traceTcS "emitFunDepDeriveds 1" (ppr (ctl_depth loc) $$ ppr eqs)
           ; mapM_ (unifyDerived loc Nominal) eqs }
      | otherwise
-     = do { traceTcS "emitFunDepDeriveds 2" (ppr (ctl_depth loc) $$ ppr eqs)
+     = do { traceTcS "emitFunDepDeriveds 2" (ppr (ctl_depth loc) $$ ppr tvs $$ ppr eqs)
           ; subst <- instFlexi tvs  -- Takes account of kind substitution
           ; mapM_ (do_one_eq loc subst) eqs }
 
@@ -2491,7 +2491,7 @@ matchInstEnv dflags short_cut_solver clas tys loc
         ; traceTcS "matchInstEnv" $
             vcat [ text "goal:" <+> ppr clas <+> ppr tys
                  , text "matches:" <+> ppr matches
-                 , text "unify:" <+> ppr unify
+                 , text "unify:" <+> ppr unify ]
         ; case (matches, unify, safeHaskFail) of
 
             -- Nothing matches
