@@ -31,7 +31,7 @@ module TcEvidence (
   TcCoercion, TcCoercionR, TcCoercionN, TcCoercionP, CoercionHole,
   Role(..), LeftOrRight(..), pickLR,
   mkTcReflCo, mkTcNomReflCo, mkTcRepReflCo,
-  mkTcTyConAppCo, mkTcAppCo, mkTcFunCo,
+  mkTcTyConAppCo, mkTcAppCo, mkTcFunCo, mkTcFunCos,
   mkTcAxInstCo, mkTcUnbranchedAxInstCo, mkTcForAllCo, mkTcForAllCos,
   mkTcSymCo, mkTcTransCo, mkTcNthCo, mkTcLRCo, mkTcSubCo, maybeTcSubCo,
   tcDowngradeRole,
@@ -104,6 +104,7 @@ mkTcRepReflCo          :: TcType -> TcCoercionR
 mkTcTyConAppCo         :: Role -> TyCon -> [TcCoercion] -> TcCoercion
 mkTcAppCo              :: TcCoercion -> TcCoercionN -> TcCoercion
 mkTcFunCo              :: Role -> TcCoercion -> TcCoercion -> TcCoercion
+mkTcFunCos             :: Role -> [TcCoercion] -> TcCoercion -> TcCoercion
 mkTcAxInstCo           :: Role -> CoAxiom br -> BranchIndex
                        -> [TcType] -> [TcCoercion] -> TcCoercion
 mkTcUnbranchedAxInstCo :: CoAxiom Unbranched -> [TcType]
@@ -139,6 +140,7 @@ mkTcRepReflCo          = mkRepReflCo
 mkTcTyConAppCo         = mkTyConAppCo
 mkTcAppCo              = mkAppCo
 mkTcFunCo              = mkFunCo
+mkTcFunCos             = mkFunCos
 mkTcAxInstCo           = mkAxInstCo
 mkTcUnbranchedAxInstCo = mkUnbranchedAxInstCo Representational
 mkTcForAllCo           = mkForAllCo
@@ -484,8 +486,15 @@ mkGivenEvBind ev tm = EvBind { eb_is_given = True, eb_lhs = ev, eb_rhs = EvExpr 
 --   type EvTerm  = CoreExpr
 -- Because of staging problems issues around EvTypeable
 data EvTerm
-    = EvExpr EvExpr
-    | EvTypeable Type EvTypeable   -- Dictionary for (Typeable ty)
+  = EvExpr EvExpr
+
+  | EvTypeable Type EvTypeable   -- Dictionary for (Typeable ty)
+
+  | EvFun { et_tvs   :: [TyVar]   -- /\as \ds. let binds in v
+          , et_given :: [EvVar]
+          , et_binds :: TcEvBinds
+          , et_body  :: EvVar }
+
   deriving Data.Data
 
 type EvExpr = CoreExpr
@@ -517,7 +526,6 @@ evDFunApp df tys ets = Var df `mkTyApps` tys `mkApps` ets
 -- in TcInterface
 evSelector :: Id -> [Type] -> [EvExpr] -> EvExpr
 evSelector sel_id tys tms = Var sel_id `mkTyApps` tys `mkApps` tms
-
 
 -- Dictionary for (Typeable ty)
 evTypeable :: Type -> EvTypeable -> EvTerm
@@ -768,6 +776,7 @@ evTermCoercion tm                     = pprPanic "evTermCoercion" (ppr tm)
 evVarsOfTerm :: EvTerm -> VarSet
 evVarsOfTerm (EvExpr e)         = exprSomeFreeVars isEvVar e
 evVarsOfTerm (EvTypeable _ ev)  = evVarsOfTypeable ev
+evVarsOfTerm (EvFun {})         = emptyVarSet
 
 evVarsOfTerms :: [EvTerm] -> VarSet
 evVarsOfTerms = mapUnionVarSet evVarsOfTerm
@@ -828,11 +837,12 @@ pprHsWrapper wrap pp_thing_inside
                                               <+> pprParendCo co)]
     help it (WpEvApp id)  = no_parens  $ sep [it True, nest 2 (ppr id)]
     help it (WpTyApp ty)  = no_parens  $ sep [it True, text "@" <+> pprParendType ty]
-    help it (WpEvLam id)  = add_parens $ sep [ text "\\" <> pp_bndr id, it False]
-    help it (WpTyLam tv)  = add_parens $ sep [text "/\\" <> pp_bndr tv, it False]
+    help it (WpEvLam id)  = add_parens $ sep [ text "\\" <> pprLamBndr id <> dot, it False]
+    help it (WpTyLam tv)  = add_parens $ sep [text "/\\" <> pprLamBndr tv <> dot, it False]
     help it (WpLet binds) = add_parens $ sep [text "let" <+> braces (ppr binds), it False]
 
-    pp_bndr v = pprBndr LambdaBind v <> dot
+pprLamBndr :: Id -> SDoc
+pprLamBndr v = pprBndr LambdaBind v
 
 add_parens, no_parens :: SDoc -> Bool -> SDoc
 add_parens d True  = parens d
@@ -861,6 +871,9 @@ instance Outputable EvBind where
 instance Outputable EvTerm where
   ppr (EvExpr e)         = ppr e
   ppr (EvTypeable ty ev) = ppr ev <+> dcolon <+> text "Typeable" <+> ppr ty
+  ppr (EvFun { et_tvs = tvs, et_given = gs, et_binds = bs, et_body = w })
+      = hang (text "\\" <+> sep (map pprLamBndr (tvs ++ gs)) <+> arrow)
+           2 (ppr bs $$ ppr w)   -- Not very pretty
 
 instance Outputable EvCallStack where
   ppr EvCsEmpty

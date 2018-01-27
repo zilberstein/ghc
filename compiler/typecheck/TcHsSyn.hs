@@ -1421,10 +1421,18 @@ zonkVect _ (HsVectInstIn _) = panic "TcHsSyn.zonkVect: HsVectInstIn"
 -}
 
 zonkEvTerm :: ZonkEnv -> EvTerm -> TcM EvTerm
-zonkEvTerm env (EvExpr e) =
-  EvExpr <$> zonkCoreExpr env e
-zonkEvTerm env (EvTypeable ty ev) =
-  EvTypeable <$> zonkTcTypeToType env ty <*> zonkEvTypeable env ev
+zonkEvTerm env (EvExpr e)
+  = EvExpr <$> zonkCoreExpr env e
+zonkEvTerm env (EvTypeable ty ev)
+  = EvTypeable <$> zonkTcTypeToType env ty <*> zonkEvTypeable env ev
+zonkEvTerm env (EvFun { et_tvs = tvs, et_given = evs
+                      , et_binds = ev_binds, et_body = body_id })
+  = do { (env0, new_tvs) <- zonkTyBndrsX env tvs
+       ; (env1, new_evs) <- zonkEvBndrsX env0 evs
+       ; (env2, new_ev_binds) <- zonkTcEvBinds env1 ev_binds
+       ; let new_body_id = zonkIdOcc env2 body_id
+       ; return (EvFun { et_tvs = new_tvs, et_given = new_evs
+                       , et_binds = new_ev_binds, et_body = new_body_id }) }
 
 zonkCoreExpr :: ZonkEnv -> CoreExpr -> TcM CoreExpr
 zonkCoreExpr env (Var v)

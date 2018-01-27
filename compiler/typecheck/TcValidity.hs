@@ -716,8 +716,13 @@ check_pred_ty :: TidyEnv -> DynFlags -> UserTypeCtxt -> PredType -> TcM ()
 -- Check the validity of a predicate in a signature
 -- See Note [Validity checking for constraints]
 check_pred_ty env dflags ctxt pred
-  = do { check_type env SigmaCtxt constraintMonoType pred
+  = do { check_type env SigmaCtxt rank pred
        ; check_pred_help False env dflags ctxt pred }
+  where
+    rank | xopt LangExt.QuantifiedConstraints dflags
+         = ArbitraryRank
+         | otherwise
+         = constraintMonoType
 
 check_pred_help :: Bool    -- True <=> under a type synonym
                 -> TidyEnv
@@ -1377,10 +1382,15 @@ checkInstTermination tys theta
            | isCTupleClass cls  -- Look inside tuple predicates; Trac #8359
            -> check_preds tys
 
-           | otherwise
-           -> check2 pred (sizeTypes $ filterOutInvisibleTypes (classTyCon cls) tys)
-                       -- Other ClassPreds
+           | otherwise          -- Other ClassPreds
+           -> check_cls_pred pred cls tys
 
+         ForAllPred _ _ cls tys -- Is this right?
+           -> check_cls_pred pred cls tys
+
+   check_cls_pred pred cls tys
+     = check2 pred (sizeTypes $ filterOutInvisibleTypes (classTyCon cls) tys)
+ 
    check2 pred pred_size
      | not (null bad_tvs)     = addErrTc (noMoreMsg bad_tvs what)
      | pred_size >= head_size = addErrTc (smallerMsg what)
@@ -2011,8 +2021,9 @@ sizePred ty = goClass ty
     go (ClassPred cls tys')
       | isTerminatingClass cls = 0
       | otherwise = sizeTypes (filterOutInvisibleTypes (classTyCon cls) tys')
-    go (EqPred {})        = 0
-    go (IrredPred ty)     = sizeType ty
+    go (EqPred {})            = 0
+    go (IrredPred ty)         = sizeType ty
+    go (ForAllPred _ _ _ tys) = sizeTypes tys  -- Is this right?
 
 -- | When this says "True", ignore this class constraint during
 -- a termination check

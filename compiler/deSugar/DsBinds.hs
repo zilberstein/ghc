@@ -1156,6 +1156,13 @@ dsEvBind (EvBind { eb_lhs = v, eb_rhs = r}) = liftM ((,) v) (dsEvTerm r)
 dsEvTerm :: EvTerm -> DsM CoreExpr
 dsEvTerm (EvExpr e)          = return e
 dsEvTerm (EvTypeable ty ev)  = dsEvTypeable ty ev
+dsEvTerm (EvFun { et_tvs = tvs, et_given = given
+                , et_binds = ev_binds, et_body = wanted_id })
+  = do { ds_ev_binds <- dsTcEvBinds ev_binds
+       ; return $ (mkLams (tvs ++ given) $
+                   mkCoreLets ds_ev_binds $
+                   Var wanted_id) }
+
 
 {-**********************************************************************
 *                                                                      *

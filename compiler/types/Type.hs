@@ -1747,18 +1747,31 @@ eqRelRole :: EqRel -> Role
 eqRelRole NomEq  = Nominal
 eqRelRole ReprEq = Representational
 
-data PredTree = ClassPred Class [Type]
-              | EqPred EqRel Type Type
-              | IrredPred PredType
+data PredTree
+  = ClassPred Class [Type]
+  | EqPred EqRel Type Type
+  | IrredPred PredType
+  | ForAllPred [TyVarBinder] [PredType] Class [Type]
+    -- ForAllPred: see Note [Quantified constraints] in TcCanonical
 
 classifyPredType :: PredType -> PredTree
 classifyPredType ev_ty = case splitTyConApp_maybe ev_ty of
     Just (tc, [_, _, ty1, ty2])
-      | tc `hasKey` eqReprPrimTyConKey    -> EqPred ReprEq ty1 ty2
-      | tc `hasKey` eqPrimTyConKey        -> EqPred NomEq ty1 ty2
+      | tc `hasKey` eqReprPrimTyConKey -> EqPred ReprEq ty1 ty2
+      | tc `hasKey` eqPrimTyConKey     -> EqPred NomEq ty1 ty2
+
     Just (tc, tys)
-      | Just clas <- tyConClass_maybe tc  -> ClassPred clas tys
-    _                                     -> IrredPred ev_ty
+      | Just clas <- tyConClass_maybe tc
+      -> ClassPred clas tys
+
+    _ | (tvs, rho) <- splitForAllTyVarBndrs ev_ty
+      , (theta, tau) <- splitFunTys rho
+      , Just (cls, tys) <- getClassPredTys_maybe tau
+      , not (null tvs && null theta)
+      -> ForAllPred tvs theta cls tys
+
+      | otherwise
+      -> IrredPred ev_ty      
 
 getClassPredTys :: HasDebugCallStack => PredType -> (Class, [Type])
 getClassPredTys ty = case getClassPredTys_maybe ty of

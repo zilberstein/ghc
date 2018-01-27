@@ -2488,6 +2488,10 @@ matchInstEnv dflags short_cut_solver clas tys loc
         ; let safeOverlapCheck = safeHaskell dflags `elem` [Sf_Safe, Sf_Trustworthy]
               (matches, unify, unsafeOverlaps) = lookupInstEnv True instEnvs clas tys
               safeHaskFail = safeOverlapCheck && not (null unsafeOverlaps)
+        ; traceTcS "matchInstEnv" $
+            vcat [ text "goal:" <+> ppr clas <+> ppr tys
+                 , text "matches:" <+> ppr matches
+                 , text "unify:" <+> ppr unify
         ; case (matches, unify, safeHaskFail) of
 
             -- Nothing matches

@@ -3174,6 +3174,9 @@ data SkolemInfo
   | UnifyForAllSkol     -- We are unifying two for-all types
        TcType           -- The instantiated type *inside* the forall
 
+  | QuantCtxtSkol       -- Quantified context, e.g.
+                        --   f :: forall c. (forall a. c a => c [a]) => blah
+
   | UnkSkol             -- Unhelpful info (until I improve it)
 
 instance Outputable SkolemInfo where
@@ -3207,6 +3210,8 @@ pprSkolInfo (InferSkol ids)   = hang (text "the inferred type" <> plural ids <+>
                                    2 (vcat [ ppr name <+> dcolon <+> ppr ty
                                                    | (name,ty) <- ids ])
 pprSkolInfo (UnifyForAllSkol ty) = text "the type" <+> ppr ty
+
+pprSkolInfo (QuantCtxtSkol {}) = text "a quantified context"
 
 -- UnkSkol
 -- For type variables the others are dealt with by pprSkolTvBinding.

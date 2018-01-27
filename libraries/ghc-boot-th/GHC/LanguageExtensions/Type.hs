@@ -134,4 +134,5 @@ data Extension
    | MonadFailDesugaring
    | EmptyDataDeriving
    | NumericUnderscores
+   | QuantifiedConstraints
    deriving (Eq, Enum, Show, Generic)

@@ -81,15 +81,28 @@ last time through, so we can skip the classification step.
 canonicalize :: Ct -> TcS (StopOrContinue Ct)
 canonicalize (CNonCanonical { cc_ev = ev })
   = {-# SCC "canNC" #-}
-    case classifyPredType (ctEvPred ev) of
+    case classifyPredType pred of
       ClassPred cls tys     -> do traceTcS "canEvNC:cls" (ppr cls <+> ppr tys)
                                   canClassNC ev cls tys
       EqPred eq_rel ty1 ty2 -> do traceTcS "canEvNC:eq" (ppr ty1 $$ ppr ty2)
                                   canEqNC    ev eq_rel ty1 ty2
-      IrredPred {}          -> do traceTcS "canEvNC:irred" (ppr (ctEvPred ev))
+      IrredPred {}          -> do traceTcS "canEvNC:irred" (ppr pred)
                                   canIrred ev
+      ForAllPred {}         -> do traceTcS "canEvNC:forall" (ppr pred)
+                                  canForAll ev
+  where
+    pred = ctEvPred ev
 
 canonicalize (CIrredCan { cc_ev = ev })
+  | EqPred eq_rel ty1 ty2 <- classifyPredType (ctEvPred ev)
+  = -- For insolubles (all of which are equalities, do /not/ flatten the arguments
+    -- In Trac #14350 doing so led entire-unnecessary and ridiculously large
+    -- type function expansion.  Instead, canEqNC just applies
+    -- the substitution to the predicate, and may do decomposition;
+    --    e.g. a ~ [a], where [G] a ~ [Int], can decompose
+    canEqNC ev eq_rel ty1 ty2
+
+  | otherwise
   = canIrred ev
 
 canonicalize (CDictCan { cc_ev = ev, cc_class  = cls
@@ -489,16 +502,8 @@ mk_strict_superclasses rec_clss ev cls tys
 canIrred :: CtEvidence -> TcS (StopOrContinue Ct)
 -- Precondition: ty not a tuple and no other evidence form
 canIrred ev
-  | EqPred eq_rel ty1 ty2 <- classifyPredType pred
-  = -- For insolubles (all of which are equalities, do /not/ flatten the arguments
-    -- In Trac #14350 doing so led entire-unnecessary and ridiculously large
-    -- type function expansion.  Instead, canEqNC just applies
-    -- the substitution to the predicate, and may do decomposition;
-    --    e.g. a ~ [a], where [G] a ~ [Int], can decompose
-    canEqNC ev eq_rel ty1 ty2
-
-  | otherwise
-  = do { traceTcS "can_pred" (text "IrredPred = " <+> ppr pred)
+  = do { let pred = ctEvPred ev
+       ; traceTcS "can_pred" (text "IrredPred = " <+> ppr pred)
        ; (xi,co) <- flatten FM_FlattenAll ev pred -- co :: xi ~ pred
        ; rewriteEvidence ev xi co `andWhenContinue` \ new_ev ->
     do { -- Re-classify, in case flattening has improved its shape
@@ -507,19 +512,144 @@ canIrred ev
            EqPred eq_rel ty1 ty2 -> canEqNC new_ev eq_rel ty1 ty2
            _                     -> continueWith $
                                     mkIrredCt new_ev } }
-  where
-    pred = ctEvPred ev
 
 canHole :: CtEvidence -> Hole -> TcS (StopOrContinue Ct)
 canHole ev hole
-  = do { let ty = ctEvPred ev
-       ; (xi,co) <- flatten FM_SubstOnly ev ty -- co :: xi ~ ty
+  = do { let pred = ctEvPred ev
+       ; (xi,co) <- flatten FM_SubstOnly ev pred -- co :: xi ~ pred
        ; rewriteEvidence ev xi co `andWhenContinue` \ new_ev ->
     do { updInertIrreds (`snocCts` (CHoleCan { cc_ev = new_ev
                                              , cc_hole = hole }))
        ; stopWith new_ev "Emit insoluble hole" } }
 
-{-
+
+{- *********************************************************************
+*                                                                      *
+*                      Quantified predicates
+*                                                                      *
+********************************************************************* -}
+
+{- Note [Quantified constraints]
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+The -XQuantifiedConstraints extension allows type-class contexts like this:
+
+  data Rose f x = Rose x (f (Rose f x))
+
+  instance (Eq a, forall b. Eq b => Eq (f b))
+        => Eq (Rose f a)  where
+    (Rose x1 rs1) == (Rose x2 rs2) = x1==x2 && rs1 == rs2
+
+Note the (forall b. Eq b => Eq (f b)) in the instance contexts.
+This quantified constraint is needed to solve the
+ [W] (Eq (f (Rose f x)))
+constraint which arises form the (==) definition.
+
+Here are the moving parts
+  * Language extension {-# LANGUAGE QuantifiedConstraints #-}
+    and add it to ghc-boot-th:GHC.LanguageExtensions.Type.Extension
+
+  * A new form of evidence, EvDFun, that is used to discharge
+    such wanted constraints
+
+  * checkValidType gets some changes to accept forall-constraints
+    only in the right places.
+    
+  * Type.PredTree gets a new constructor ForAllPred, and
+    and classifyPredType analyses a PredType to decompose
+    the new forall-constraints
+
+  * TcSMonad.InertCans gets an extra field, inert_insts,
+    which holds all the Given forall-constraints.  In effect,
+    such Given constraints are like local instance decls.
+
+  * When trying to solve a class constraint, via
+    TcInteract.matchInstEnv, use the InstEnv from inert_insts
+    so that we include the local Given forall-constraints
+    in the lookup.  (See TcSMonad.getInstEnvs.)
+
+  * TcCanonical.canForAll deals with solving a
+    forall-constraint.  See
+       Note [Solving a Wanted forall-constraint]
+       Note [Solving a Wanted forall-constraint]
+
+  * We augment the kick-out code to kick out an inert
+    forall constraint if it can be rewritten by a new
+    type equality; see TcSMonad.kick_out_rewritable
+
+Note that a quantified constraint is never /inferred/
+(by TcSimplify.simplifyInfer).  A function can only have a
+quantified constraint in its type if it is given an explicit
+type signature.
+-}
+
+canForAll :: CtEvidence -> TcS (StopOrContinue Ct)
+-- We have a constraint (forall as. blah => C tys)
+canForAll ev
+  = do { -- First rewrite it to apply the current substitution
+         -- Do not bother with type-family reductions; we can't
+         -- do them under a forall anyway (c.f. Flatten.flatten_one
+         -- on a forall type)
+         let pred = ctEvPred ev
+       ; (xi,co) <- flatten FM_SubstOnly ev pred -- co :: xi ~ pred
+       ; rewriteEvidence ev xi co `andWhenContinue` \ new_ev ->
+
+    do { -- Now decompose into its pieces and solve it
+         -- (It takes a lot less code to flatten before decomposing.)
+       ; case classifyPredType (ctEvPred new_ev) of
+           ForAllPred tv_bndrs theta cls tys
+              -> solveForAll new_ev tv_bndrs theta cls tys
+           _  -> pprPanic "canForAll" (ppr new_ev)
+    } }
+
+solveForAll :: CtEvidence -> [TyVarBinder] -> TcThetaType -> Class -> [TcType]
+            -> TcS (StopOrContinue Ct)
+solveForAll ev tv_bndrs theta cls tys
+  | isWanted ev  -- See Note [Solving a Wanted forall-constraint]
+  = do { given_ev_vars <- mapM newEvVar theta
+       ; let skol_info = QuantCtxtSkol
+       ; (implic, ev_binds, w_id)
+             <- buildImplication skol_info tvs given_ev_vars $
+                do { wanted_ev <- newWantedNC loc (mkClassPred cls tys)
+                   ; emitWorkNC [wanted_ev]
+                   ; return (ctEvEvId wanted_ev) }
+
+      ; traceTcS "solveForAll: wanted" (ppr implic)
+      ; updWorkListTcS (extendWorkListImplic implic)
+      ; setWantedEvBind (ctEvEvId ev) $
+        EvFun { et_tvs = tvs, et_given = given_ev_vars
+              , et_binds = ev_binds, et_body = w_id }
+      ; stopWith ev "Wanted forall-constraint" }
+
+  | isGiven ev   -- See Note [Solving a Given forall-constraint]
+  = do { addInertForAll ev tvs cls tys
+       ; stopWith ev "Given forall-constraint" }
+
+  | otherwise
+  = stopWith ev "Derived forall-constraint"
+  where
+    loc = ctEvLoc ev
+    tvs = binderVars tv_bndrs
+
+{- Note [Solving a Wanted forall-constraint]
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+Solving a wanted forall constraints
+  [W] df :: forall ab. (Eq a, Ord b) => C x a b
+is deligtfully easy.   Just build an implication constraint
+    forall ab. (g1::Eq a, g2::Ord b) => [W] d :: C x a 
+and discharge df thus:
+    df = /\ab. \g1 g2. let <binds> in d
+where <binds> is filled in by solving the implication constraint.
+All the machinery is to hand; there is little to do.
+    
+Note [Solving a Wanted forall-constraint]
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+For a Given constraint
+  [G] df :: forall ab. (Eq a, Ord b) => C x a b
+we just add it to TcS's local InstEnv of known instances,
+via addInertForall.  Then, if we look up (C x Int Bool), say,
+we'll find a match in the InstEnv.
+
+
 ************************************************************************
 *                                                                      *
 *        Equalities
@@ -719,7 +849,7 @@ can_eq_nc_forall ev eq_rel s1 s2
                    ; let subst' = extendTvSubst subst tv2
                                        (mkCastTy (mkTyVarTy skol_tv) kind_co)
                    ; co <- go skol_tvs subst' bndrs2
-                   ; return (mkForAllCo skol_tv kind_co co) }
+                   ; return (mkTcForAllCo skol_tv kind_co co) }
 
             -- Done: unify phi1 ~ phi2
             go [] subst bndrs2
