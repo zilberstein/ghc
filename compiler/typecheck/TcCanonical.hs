@@ -553,7 +553,7 @@ Here are the moving parts
 
   * checkValidType gets some changes to accept forall-constraints
     only in the right places.
-    
+
   * Type.PredTree gets a new constructor ForAllPred, and
     and classifyPredType analyses a PredType to decompose
     the new forall-constraints

@@ -1983,6 +1983,7 @@ pickQuantifiablePreds qtvs theta
 
           EqPred NomEq ty1 ty2  -> quant_fun ty1 || quant_fun ty2
           IrredPred ty          -> tyCoVarsOfType ty `intersectsVarSet` qtvs
+          ForAllPred {}         -> False
 
     pick_cls_pred flex_ctxt cls tys
       = tyCoVarsOfTypes tys `intersectsVarSet` qtvs
@@ -2087,6 +2088,7 @@ isImprovementPred ty
       EqPred ReprEq _ _  -> False
       ClassPred cls _    -> classHasFds cls
       IrredPred {}       -> True -- Might have equalities after reduction?
+      ForAllPred {}      -> False
 
 {- Note [Expanding superclasses]
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
