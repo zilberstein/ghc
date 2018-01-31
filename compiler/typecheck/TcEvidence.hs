@@ -16,7 +16,7 @@ module TcEvidence (
   lookupEvBind, evBindMapBinds, foldEvBindMap, filterEvBindMap,
   isEmptyEvBindMap,
   EvBind(..), emptyTcEvBinds, isEmptyTcEvBinds, mkGivenEvBind, mkWantedEvBind,
-  sccEvBinds, evBindVar,
+  evBindVar,
 
   -- EvTerm (already a CoreExpr)
   EvTerm(..), EvExpr,
@@ -773,10 +773,17 @@ evTermCoercion (EvExpr (Coercion co)) = co
 evTermCoercion (EvExpr (Cast tm co))  = mkCoCast (evTermCoercion (EvExpr tm)) co
 evTermCoercion tm                     = pprPanic "evTermCoercion" (ppr tm)
 
+
+{- *********************************************************************
+*                                                                      *
+                  Free variables
+*                                                                      *
+********************************************************************* -}
+
 evVarsOfTerm :: EvTerm -> VarSet
 evVarsOfTerm (EvExpr e)         = exprSomeFreeVars isEvVar e
 evVarsOfTerm (EvTypeable _ ev)  = evVarsOfTypeable ev
-evVarsOfTerm (EvFun {})         = emptyVarSet
+evVarsOfTerm (EvFun {})         = emptyVarSet -- See Note [Free vars of EvFun]
 
 evVarsOfTerms :: [EvTerm] -> VarSet
 evVarsOfTerms = mapUnionVarSet evVarsOfTerm
@@ -789,22 +796,20 @@ evVarsOfTypeable ev =
     EvTypeableTrFun e1 e2 -> evVarsOfTerms [e1,e2]
     EvTypeableTyLit e     -> evVarsOfTerm e
 
--- | Do SCC analysis on a bag of 'EvBind's.
-sccEvBinds :: Bag EvBind -> [SCC EvBind]
-sccEvBinds bs = stronglyConnCompFromEdgedVerticesUniq edges
-  where
-    edges :: [ Node EvVar EvBind ]
-    edges = foldrBag ((:) . mk_node) [] bs
 
-    mk_node :: EvBind -> Node EvVar EvBind
-    mk_node b@(EvBind { eb_lhs = var, eb_rhs = term })
-      = DigraphNode b var (nonDetEltsUniqSet (evVarsOfTerm term `unionVarSet`
-                                coVarsOfType (varType var)))
-      -- It's OK to use nonDetEltsUniqSet here as stronglyConnCompFromEdgedVertices
-      -- is still deterministic even if the edges are in nondeterministic order
-      -- as explained in Note [Deterministic SCC] in Digraph.
+{- Note [Free vars of EvFun]
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+Finding the free vars of an EvFun is made tricky by the fact the
+bindings et_binds may be a mutable variable.  Fortunately, we
+can just squeeze by.  Here's how.
 
-{-
+* evVarsOfTerm is used only by TcSimplify.neededEvVars.
+* Each EvBindsVar in an et_binds field of an EvFun is /also/ in the
+  ic_binds field of an Implication
+* So we can track usage via the processing for that implication,
+  (see Note [Tracking redundant constraints] in TcSimplify).
+  We can ignore usage from the EvFun altogether.
+
 ************************************************************************
 *                                                                      *
                   Pretty printing
