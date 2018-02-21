@@ -1751,7 +1751,7 @@ data PredTree
   = ClassPred Class [Type]
   | EqPred EqRel Type Type
   | IrredPred PredType
-  | ForAllPred [TyVarBinder] [PredType] Class [Type]
+  | ForAllPred [TyVarBinder] [PredType] PredType
     -- ForAllPred: see Note [Quantified constraints] in TcCanonical
 
 classifyPredType :: PredType -> PredTree
@@ -1765,10 +1765,9 @@ classifyPredType ev_ty = case splitTyConApp_maybe ev_ty of
       -> ClassPred clas tys
 
     _ | (tvs, rho) <- splitForAllTyVarBndrs ev_ty
-      , (theta, tau) <- splitFunTys rho
-      , Just (cls, tys) <- getClassPredTys_maybe tau
+      , (theta, pred) <- splitFunTys rho
       , not (null tvs && null theta)
-      -> ForAllPred tvs theta cls tys
+      -> ForAllPred tvs theta pred
 
       | otherwise
       -> IrredPred ev_ty      

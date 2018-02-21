@@ -596,22 +596,21 @@ canForAll ev
     do { -- Now decompose into its pieces and solve it
          -- (It takes a lot less code to flatten before decomposing.)
        ; case classifyPredType (ctEvPred new_ev) of
-           ForAllPred tv_bndrs theta cls tys
-              -> solveForAll new_ev tv_bndrs theta cls tys
+           ForAllPred tv_bndrs theta pred
+              -> solveForAll new_ev tv_bndrs theta pred
            _  -> pprPanic "canForAll" (ppr new_ev)
     } }
 
-solveForAll :: CtEvidence -> [TyVarBinder] -> TcThetaType -> Class -> [TcType]
+solveForAll :: CtEvidence -> [TyVarBinder] -> TcThetaType -> PredType
             -> TcS (StopOrContinue Ct)
-solveForAll ev tv_bndrs theta cls tys
+solveForAll ev tv_bndrs theta pred
   | isWanted ev  -- See Note [Solving a Wanted forall-constraint]
   = do { given_ev_vars <- mapM newEvVar theta
        ; let skol_info = QuantCtxtSkol
        ; (implic, ev_binds, w_id)
              <- buildImplication skol_info tvs given_ev_vars $
-                do { wanted_ev <- newWantedNC loc (mkClassPred cls tys)
-                   ; emitWorkNC [wanted_ev]
-                   ; return (ctEvEvId wanted_ev) }
+                do { wanted_ev <- newWantedEvVarNC loc pred
+                   ; return ([wanted_ev], ctEvEvId wanted_ev) }
 
       ; traceTcS "solveForAll: wanted" (ppr implic)
       ; updWorkListTcS (extendWorkListImplic implic)
@@ -621,7 +620,7 @@ solveForAll ev tv_bndrs theta cls tys
       ; stopWith ev "Wanted forall-constraint" }
 
   | isGiven ev   -- See Note [Solving a Given forall-constraint]
-  = do { addInertForAll ev tvs cls tys
+  = do { addInertForAll ev tvs pred
        ; stopWith ev "Given forall-constraint" }
 
   | otherwise
@@ -641,8 +640,8 @@ and discharge df thus:
 where <binds> is filled in by solving the implication constraint.
 All the machinery is to hand; there is little to do.
     
-Note [Solving a Wanted forall-constraint]
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+Note [Solving a Given forall-constraint]
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 For a Given constraint
   [G] df :: forall ab. (Eq a, Ord b) => C x a b
 we just add it to TcS's local InstEnv of known instances,
@@ -841,21 +840,21 @@ can_eq_nc_forall ev eq_rel s1 s2
             phi1' = substTy subst1 phi1
 
             -- Unify the kinds, extend the substitution
+            go :: [TcTyVar] -> TCvSubst -> [TyVarBinder]
+                  -> TcS ([CtEvidence], TcCoercion)
             go (skol_tv:skol_tvs) subst (bndr2:bndrs2)
               = do { let tv2 = binderVar bndr2
-                   ; kind_co <- unifyWanted loc Nominal
-                                            (tyVarKind skol_tv)
-                                            (substTy subst (tyVarKind tv2))
+                   ; (wanteds1, kind_co) <- unify loc Nominal (tyVarKind skol_tv)
+                                                  (substTy subst (tyVarKind tv2))
                    ; let subst' = extendTvSubst subst tv2
                                        (mkCastTy (mkTyVarTy skol_tv) kind_co)
-                   ; co <- go skol_tvs subst' bndrs2
-                   ; return (mkTcForAllCo skol_tv kind_co co) }
+                   ; (wanteds2, co) <- go skol_tvs subst' bndrs2
+                   ; return (wanteds1++wanteds2, mkTcForAllCo skol_tv kind_co co) }
 
             -- Done: unify phi1 ~ phi2
             go [] subst bndrs2
               = ASSERT( null bndrs2 )
-                unifyWanted loc (eqRelRole eq_rel)
-                            phi1' (substTy subst phi2)
+                unify loc (eqRelRole eq_rel) phi1' (substTy subst phi2)
 
             go _ _ _ = panic "cna_eq_nc_forall"  -- case (s:ss) []
 
@@ -876,6 +875,18 @@ can_eq_nc_forall ev eq_rel s1 s2
  = do { traceTcS "Omitting decomposition of given polytype equality" $
         pprEq s1 s2    -- See Note [Do not decompose given polytype equalities]
       ; stopWith ev "Discard given polytype equality" }
+
+ where
+    unify :: CtLoc -> Role -> TcType -> TcType
+          -> TcS ([CtEvidence], TcCoercion)
+    -- This version returns the wanted constraint rather
+    -- than putting it in the work list
+    unify loc role ty1 ty2
+      | ty1 `tcEqType` ty2
+      = return ([], mkTcReflCo role ty1)
+      | otherwise
+      = do { (wanted, co) <- newWantedEq loc role ty1 ty2
+           ; return ([wanted], co) }
 
 ---------------------------------
 -- | Compare types for equality, while zonking as necessary. Gives up

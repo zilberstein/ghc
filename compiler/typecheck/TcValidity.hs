@@ -10,7 +10,7 @@ module TcValidity (
   ContextKind(..), expectedKindInCtxt,
   checkValidTheta, checkValidFamPats,
   checkValidInstance, validDerivPred,
-  checkInstTermination, checkTySynRhs,
+  checkTySynRhs,
   ClsInstInfo, checkValidCoAxiom, checkValidCoAxBranch,
   checkValidTyFamEqn,
   arityErr, badATErr,
@@ -1317,7 +1317,7 @@ checkValidInstance ctxt hs_type ty
         ; undecidable_ok <- xoptM LangExt.UndecidableInstances
         ; if undecidable_ok
           then checkAmbiguity ctxt ty
-          else checkInstTermination inst_tys theta
+          else checkInstTermination theta tau
 
         ; traceTc "cvi 2" (ppr ty)
 
@@ -1359,45 +1359,45 @@ The underlying idea is that
     context has fewer type constructors than the head.
 -}
 
-checkInstTermination :: [TcType] -> ThetaType -> TcM ()
+checkInstTermination :: ThetaType -> TcPredType -> TcM ()
 -- See Note [Paterson conditions]
-checkInstTermination tys theta
-  = check_preds theta
+checkInstTermination theta head_pred
+  = check_preds emptyVarSet theta
   where
-   head_fvs  = fvTypes tys
-   head_size = sizeTypes tys
+   head_fvs  = fvType head_pred
+   head_size = sizeType head_pred
 
-   check_preds :: [PredType] -> TcM ()
-   check_preds preds = mapM_ check preds
+   check_preds :: VarSet -> [PredType] -> TcM ()
+   check_preds foralld_tvs preds = mapM_ (check foralld_tvs) preds
 
-   check :: PredType -> TcM ()
-   check pred
+   check :: VarSet -> PredType -> TcM ()
+   check foralld_tvs pred
      = case classifyPredType pred of
          EqPred {}    -> return ()  -- See Trac #4200.
-         IrredPred {} -> check2 pred (sizeType pred)
+         IrredPred {} -> check2 foralld_tvs pred
          ClassPred cls tys
            | isTerminatingClass cls
            -> return ()
 
            | isCTupleClass cls  -- Look inside tuple predicates; Trac #8359
-           -> check_preds tys
+           -> check_preds foralld_tvs tys
 
            | otherwise          -- Other ClassPreds
-           -> check_cls_pred pred cls tys
+           -> check2 foralld_tvs pred
 
-         ForAllPred _ _ cls tys -- Is this right?
-           -> check_cls_pred pred cls tys
+         ForAllPred tvs theta pred
+           -> do { check (foralld_tvs `extendVarSetList` binderVars tvs) pred
+                 ; checkInstTermination theta pred }
 
-   check_cls_pred pred cls tys
-     = check2 pred (sizeTypes $ filterOutInvisibleTypes (classTyCon cls) tys)
- 
-   check2 pred pred_size
+   check2 foralld_tvs pred
      | not (null bad_tvs)     = addErrTc (noMoreMsg bad_tvs what)
      | pred_size >= head_size = addErrTc (smallerMsg what)
      | otherwise              = return ()
      where
+        pred_size = sizeType pred
         what    = text "constraint" <+> quotes (ppr pred)
-        bad_tvs = fvType pred \\ head_fvs
+        bad_tvs = filterOut (`elemVarSet` foralld_tvs) (fvType pred)
+                  \\ head_fvs
 
 smallerMsg :: SDoc -> SDoc
 smallerMsg what
@@ -1993,7 +1993,7 @@ sizeType :: Type -> Int
 -- Size of a type: the number of variables and constructors
 sizeType ty | Just exp_ty <- tcView ty = sizeType exp_ty
 sizeType (TyVarTy {})      = 1
-sizeType (TyConApp _ tys)  = sizeTypes tys + 1
+sizeType (TyConApp tc tys) = 1 + (sizeTypes $ filterOutInvisibleTypes tc tys)
 sizeType (LitTy {})        = 1
 sizeType (AppTy fun arg)   = sizeType fun + sizeType arg
 sizeType (FunTy arg res)   = sizeType arg + sizeType res + 1
@@ -2021,9 +2021,9 @@ sizePred ty = goClass ty
     go (ClassPred cls tys')
       | isTerminatingClass cls = 0
       | otherwise = sizeTypes (filterOutInvisibleTypes (classTyCon cls) tys')
-    go (EqPred {})            = 0
-    go (IrredPred ty)         = sizeType ty
-    go (ForAllPred _ _ _ tys) = sizeTypes tys  -- Is this right?
+    go (EqPred {})           = 0
+    go (IrredPred ty)        = sizeType ty
+    go (ForAllPred _ _ pred) = goClass pred  -- Is this right?
 
 -- | When this says "True", ignore this class constraint during
 -- a termination check

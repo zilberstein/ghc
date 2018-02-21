@@ -20,6 +20,8 @@ module TcSMonad (
 
     runTcPluginTcS, addUsedGRE, addUsedGREs,
 
+    QCInst(..),
+    
     -- Tracing etc
     panicTcS, traceTcS,
     traceFireTcS, bumpStepCountTcS, csTraceTcS,
@@ -160,7 +162,6 @@ import UniqFM
 import UniqDFM
 import Maybes
 
-import BasicTypes( SourceText(..) )
 import TrieMap
 import Control.Monad
 import qualified Control.Monad.Fail as MonadFail
@@ -250,16 +251,6 @@ appendWorkList
 workListSize :: WorkList -> Int
 workListSize (WL { wl_eqs = eqs, wl_funeqs = funeqs, wl_deriv = ders, wl_rest = rest })
   = length eqs + length funeqs + length rest + length ders
-
-workListToWanted :: WorkList -> WantedConstraints
--- Rather an ugly function
-workListToWanted (WL { wl_eqs = eqs, wl_funeqs = funeqs, wl_rest = rest
-                     , wl_deriv = ders, wl_implics = implics })
-  = WC { wc_simple = listToCts eqs    `andCts`
-                     listToCts funeqs `andCts`
-                     listToCts rest   `andCts`
-                     listToCts (map mkNonCanonical ders)
-       , wc_impl   = implics }
 
 workListWantedCount :: WorkList -> Int
 -- Count the things we need to solve
@@ -438,20 +429,19 @@ instance Outputable InertSet where
          where
            dicts = bagToList (dictsToBag (inert_solved_dicts is))
 
-emptyInertCans :: TcM InertCans
+emptyInertCans :: InertCans
 emptyInertCans
-  = do { tc_gbl_env <- TcM.getGblEnv
-       ; return (IC { inert_count    = 0
-                    , inert_eqs      = emptyDVarEnv
-                    , inert_dicts    = emptyDicts
-                    , inert_safehask = emptyDicts
-                    , inert_funeqs   = emptyFunEqs
-                    , inert_insts    = ([], tcg_inst_env tc_gbl_env)
-                    , inert_irreds   = emptyCts }) }
+  = IC { inert_count    = 0
+       , inert_eqs      = emptyDVarEnv
+       , inert_dicts    = emptyDicts
+       , inert_safehask = emptyDicts
+       , inert_funeqs   = emptyFunEqs
+       , inert_insts    = []
+       , inert_irreds   = emptyCts }
 
-emptyInert :: InertCans -> InertSet
-emptyInert ics
-  = IS { inert_cans         = ics
+emptyInert :: InertSet
+emptyInert
+  = IS { inert_cans         = emptyInertCans
        , inert_fsks         = []
        , inert_flat_cache   = emptyExactFunEqs
        , inert_solved_dicts = emptyDictMap }
@@ -481,8 +471,15 @@ Other notes about solved dictionaries
 
 * See also Note [Do not add superclasses of solved dictionaries]
 
-* The inert_solved_dicts field is not rewritten by equalities, so it may
-  get out of date.
+* The inert_solved_dicts field is not rewritten by equalities,
+  so it may get out of date.
+
+* We only cache dictionaries from top-level instances, not from
+  local quantified constraints.  Reason: if we cached the latter
+  we'd need to purge the cache when bringing new quantified
+  constraints into scope, because quantified constraints "shadow"
+  top-level instances.
+  
 
 Note [Do not add superclasses of solved dictionaries]
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -643,13 +640,7 @@ data InertCans   -- See Note [Detailed InertCans Invariants] for more
               -- All fully rewritten (modulo flavour constraints)
               --     wrt inert_eqs
 
-       , inert_insts :: ([CtEvidence], InstEnv)
-              -- The [CtEvidence] are all Nominal Given constraints of form
-              --   forall abc. Context => C t1 t2 t3
-              -- INVARIANT: all the CtEvidence constraints are Given
-              -- INVARIANT: the InstEnv is the top-level local InstEnv
-              -- (from TcGblEnv) augmented with the listed given constraints
-              -- See Note [Quantified constraints] in TcCanonical
+       , inert_insts :: [QCInst]
 
        , inert_safehask :: DictMap Ct
               -- Failed dictionary resolution due to Safe Haskell overlapping
@@ -675,6 +666,17 @@ data InertCans   -- See Note [Detailed InertCans Invariants] for more
 type InertEqs    = DTyVarEnv EqualCtList
 type EqualCtList = [Ct]  -- See Note [EqualCtList invariants]
 
+data QCInst  -- A much simplified version of ClsInst
+             -- See Note [Quantified constraints] in TcCanonical
+  = QCI { qci_ev   :: CtEvidence -- Always of type forall tvs. context => ty
+                                 -- Always Given
+        , qci_tvs  :: [TcTyVar]  -- The tvs
+        , qci_pred :: TcPredType -- The ty
+    }
+
+instance Outputable QCInst where
+  ppr (QCI { qci_ev = ev }) = ppr ev
+              
 {- Note [Detailed InertCans Invariants]
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 The InertCans represents a collection of constraints with the following properties:
@@ -1007,7 +1009,7 @@ instance Outputable InertCans where
   ppr (IC { inert_eqs = eqs
           , inert_funeqs = funeqs, inert_dicts = dicts
           , inert_safehask = safehask, inert_irreds = irreds
-          , inert_insts = (insts, _)
+          , inert_insts = insts
           , inert_count = count })
     = braces $ vcat
       [ ppUnless (isEmptyDVarEnv eqs) $
@@ -1404,19 +1406,13 @@ equalities arising from injectivity.
 *                                                                      *
 ********************************************************************* -}
 
-addInertForAll :: CtEvidence -> [TyVar] -> Class -> [TcType] -> TcS ()
+addInertForAll :: CtEvidence -> [TyVar] -> TcPredType -> TcS ()
 -- Add a local Given instance, typically arising from a type signature
-addInertForAll ev tvs cls tys
+addInertForAll ev tvs pred
   = updInertCans $ \ics ->
-    ics { inert_insts = add (inert_insts ics) }
+    ics { inert_insts = qci : inert_insts ics }
   where
-    add (inst_evs, inst_env) = ( ev : inst_evs
-                               , extendInstEnv inst_env inst )
-    dfun = ctEvEvId ev
-    inst = mkLocalInstance dfun oflag tvs cls tys
-    oflag = OverlapFlag { overlapMode = Incoherent NoSourceText
-                             -- Note [Local instances and incoherence]
-                        , isSafeOverlap = False }
+    qci = QCI { qci_ev = ev, qci_tvs = tvs, qci_pred = pred }
 
 {- Note [Local instances and incoherence]
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -1576,7 +1572,7 @@ kick_out_rewritable new_fr new_tv
                             , inert_safehask = safehask
                             , inert_funeqs   = funeqmap
                             , inert_irreds   = irreds
-                            , inert_insts    = old_insts@(inst_evs, inst_env)
+                            , inert_insts    = old_insts
                             , inert_count    = n })
   | not (new_fr `eqMayRewriteFR` new_fr)
   = (emptyWorkList, ics)
@@ -1599,9 +1595,8 @@ kick_out_rewritable new_fr new_tv
     kicked_out = WL { wl_eqs     = tv_eqs_out
                     , wl_funeqs  = feqs_out
                     , wl_deriv   = []
-                    , wl_rest    = bagToList (dicts_out `andCts`
-                                              irs_out   `andCts`
-                                              insts_out)
+                    , wl_rest    = insts_out ++
+                                   bagToList (dicts_out `andCts` irs_out)
                     , wl_implics = emptyBag }
 
     (tv_eqs_out, tv_eqs_in) = foldDVarEnv kick_out_eqs ([], emptyDVarEnv) tv_eqs
@@ -1615,19 +1610,19 @@ kick_out_rewritable new_fr new_tv
 
     -- Kick-out for inert instances
     -- See Note [Quantified constraints] in TcCanonical
-    insts_out :: Cts
-    insts_in  :: ([CtEvidence], InstEnv)
+    insts_out :: [Ct]
+    insts_in  :: [QCInst]
     (insts_out, insts_in)
        | fr_may_rewrite (Given, NomEq)  -- All the insts are Givens
-       , (evs_out, evs_in) <- partition kick_out_inst inst_evs
-       = ( listToBag (map mkNonCanonical evs_out)
-         , (evs_in, foldl del_one inst_env evs_out) )
-
+       = partitionWith kick_out_qci old_insts
        | otherwise
-       =  (emptyBag, old_insts)
-       where
-          del_one inst_env ev = deleteDFunFromInstEnv inst_env (ctEvEvId ev)
-          kick_out_inst ev = fr_can_rewrite_ty NomEq (ctEvPred ev)
+       = ([], old_insts)
+    kick_out_qci qci
+      | let ev = qci_ev qci
+      , fr_can_rewrite_ty NomEq (ctEvPred (qci_ev qci))
+      = Left (mkNonCanonical ev)
+      | otherwise
+      = Right qci
 
     (_, new_role) = new_fr
 
@@ -2584,8 +2579,7 @@ runTcSWithEvBinds :: EvBindsVar
 runTcSWithEvBinds ev_binds_var tcs
   = do { unified_var <- TcM.newTcRef 0
        ; step_count <- TcM.newTcRef 0
-       ; inert_cans <- emptyInertCans
-       ; inert_var <- TcM.newTcRef (emptyInert inert_cans)
+       ; inert_var <- TcM.newTcRef emptyInert
        ; wl_var <- TcM.newTcRef emptyWorkList
        ; let env = TcSEnv { tcs_ev_binds      = ev_binds_var
                           , tcs_unified       = unified_var
@@ -2651,9 +2645,10 @@ nestImplicTcS ref inner_tclvl (TcS thing_inside)
                    , tcs_count         = count
                    } ->
     do { inerts <- TcM.readTcRef old_inert_var
-       ; let nest_inert = (emptyInert (inert_cans inerts))
-                            { inert_solved_dicts = inert_solved_dicts inerts }
-                          -- See Note [Do not inherit the flat cache]
+       ; let nest_inert = emptyInert
+                            { inert_cans = inert_cans inerts
+                            , inert_solved_dicts = inert_solved_dicts inerts }
+                              -- See Note [Do not inherit the flat cache]
        ; new_inert_var <- TcM.newTcRef nest_inert
        ; new_wl_var    <- TcM.newTcRef emptyWorkList
        ; let nest_env = TcSEnv { tcs_ev_binds      = ref
@@ -2716,22 +2711,25 @@ nestTcS (TcS thing_inside)
 buildImplication :: SkolemInfo
                  -> [TcTyVar]        -- Skolems
                  -> [EvVar]          -- Givens
-                 -> TcS result
+                 -> TcS ([CtEvidence], result)
                  -> TcS (Bag Implication, TcEvBinds, result)
--- Just like TcUnify.buildImplication, but in the TcS monnad,
--- using the work-list to gather the constraints
+-- Similar to TcUnify.buildImplication, but 
+--   - In the TcS monnad
+--   - The thing-inside should not put things in the work-list
+--     Instead, it returns the Wanted constraints it needs
 buildImplication skol_info skol_tvs givens (TcS thing_inside)
   = TcS $ \ env ->
-    do { new_wl_var <- TcM.newTcRef emptyWorkList
-       ; tc_lvl <- TcM.getTcLevel
+    do { tc_lvl <- TcM.getTcLevel
        ; let new_tclvl = pushTcLevel tc_lvl
+             wl_panic  = pprPanic "TcSMonad.buildImplication" $
+                         ppr skol_info $$ ppr skol_tvs
+                         -- This panic checks that the thing-inside
+                         -- does not emit any work-list constraints
+       ; (wanteds, res)
+             <- TcM.setTcLevel new_tclvl $
+                thing_inside (env { tcs_worklist = wl_panic })
 
-       ; res <- TcM.setTcLevel new_tclvl $
-                thing_inside (env { tcs_worklist = new_wl_var })
-
-       ; wl <- TcM.readTcRef new_wl_var
-       ; let wc = workListToWanted wl
-       ; if isEmptyWC wc
+       ; if null wanteds
          then return (emptyBag, emptyTcEvBinds, res)
          else
     do { env <- TcM.getLclEnv
@@ -2739,7 +2737,7 @@ buildImplication skol_info skol_tvs givens (TcS thing_inside)
        ; let imp = newImplication { ic_tclvl  = new_tclvl
                                   , ic_skols  = skol_tvs
                                   , ic_given  = givens
-                                  , ic_wanted = wc
+                                  , ic_wanted = mkSimpleWC wanteds
                                   , ic_binds  = ev_binds_var
                                   , ic_env    = env
                                   , ic_info   = skol_info }
@@ -2855,15 +2853,7 @@ getDefaultInfo = wrapTcS TcM.tcGetDefaultTys
 -- ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 getInstEnvs :: TcS InstEnvs
--- Get the local InstEnv from the InertCans
--- See Note [Quantified constraints] in TcCanonical
-getInstEnvs = do { (eps, tc_env) <- wrapTcS $ do { eps <- TcM.getEps
-                                                 ; env <- TcM.getGblEnv
-                                                 ; return (eps, env) }
-                 ; ics <- getInertCans
-                 ; return (InstEnvs { ie_global  = eps_inst_env eps
-                                    , ie_local   = snd (inert_insts ics)
-                                    , ie_visible = tcVisibleOrphanMods tc_env }) }
+getInstEnvs = wrapTcS $ TcM.tcGetInstEnvs
 
 getFamInstEnvs :: TcS (FamInstEnv, FamInstEnv)
 getFamInstEnvs = wrapTcS $ FamInst.tcGetFamInstEnvs
