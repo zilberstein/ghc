@@ -85,8 +85,8 @@ module DynFlags (
         pgm_L, pgm_P, pgm_F, pgm_c, pgm_s, pgm_a, pgm_l, pgm_dll, pgm_T,
         pgm_windres, pgm_libtool, pgm_lo, pgm_lc, pgm_i,
         opt_L, opt_P, opt_F, opt_c, opt_a, opt_l, opt_i,
+        opt_P_signature,
         opt_windres, opt_lo, opt_lc,
-
 
         -- ** Manipulating DynFlags
         defaultDynFlags,                -- Settings -> DynFlags
@@ -180,6 +180,7 @@ import qualified Pretty
 import SrcLoc
 import BasicTypes       ( IntWithInf, treatZeroAsInf )
 import FastString
+import Fingerprint
 import Outputable
 import Foreign.C        ( CInt(..) )
 import System.IO.Unsafe ( unsafeDupablePerformIO )
@@ -1035,6 +1036,8 @@ data Settings = Settings {
   -- options for particular phases
   sOpt_L                 :: [String],
   sOpt_P                 :: [String],
+  sOpt_P_fingerprint     :: Fingerprint, -- cached Fingerprint of sOpt_P
+                                         -- See Note [Repeated -optP hashing]
   sOpt_F                 :: [String],
   sOpt_c                 :: [String],
   sOpt_a                 :: [String],
@@ -1100,6 +1103,14 @@ opt_L dflags = sOpt_L (settings dflags)
 opt_P                 :: DynFlags -> [String]
 opt_P dflags = concatMap (wayOptP (targetPlatform dflags)) (ways dflags)
             ++ sOpt_P (settings dflags)
+
+-- This function packages everything that's needed to fingerprint opt_P
+-- flags. See Note [Repeated -optP hashing].
+opt_P_signature       :: DynFlags -> ([String], Fingerprint)
+opt_P_signature dflags =
+  ( concatMap (wayOptP (targetPlatform dflags)) (ways dflags)
+  , sOpt_P_fingerprint (settings dflags))
+
 opt_F                 :: DynFlags -> [String]
 opt_F dflags = sOpt_F (settings dflags)
 opt_c                 :: DynFlags -> [String]
@@ -2278,7 +2289,12 @@ setDumpPrefixForce f d = d { dumpPrefixForce = f}
 setPgmP   f = let (pgm:args) = words f in alterSettings (\s -> s { sPgm_P   = (pgm, map Option args)})
 addOptl   f = alterSettings (\s -> s { sOpt_l   = f : sOpt_l s})
 addOptc   f = alterSettings (\s -> s { sOpt_c   = f : sOpt_c s})
-addOptP   f = alterSettings (\s -> s { sOpt_P   = f : sOpt_P s})
+addOptP   f = alterSettings (\s -> s { sOpt_P   = f : sOpt_P s
+                                     , sOpt_P_fingerprint = fingerprintStrings (f : sOpt_P s)
+                                     })
+                                     -- See Note [Repeated -optP hashing]
+  where
+  fingerprintStrings ss = fingerprintFingerprints $ map fingerprintString ss
 
 
 setDepMakefile :: FilePath -> DynFlags -> DynFlags
