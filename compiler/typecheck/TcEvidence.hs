@@ -69,12 +69,10 @@ import CoreFVs ( exprSomeFreeVars )
 
 import Util
 import Bag
-import Digraph
 import qualified Data.Data as Data
 import Outputable
 import SrcLoc
 import Data.IORef( IORef )
-import UniqSet
 
 {-
 Note [TcCoercions]

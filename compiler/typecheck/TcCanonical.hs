@@ -28,6 +28,7 @@ import FamInstEnv ( FamInstEnvs )
 import FamInst ( tcTopNormaliseNewTypeTF_maybe )
 import Var
 import VarEnv( mkInScopeSet )
+import VarSet( delVarSetList )
 import Outputable
 import DynFlags( DynFlags )
 import NameSet
@@ -605,17 +606,22 @@ solveForAll :: CtEvidence -> [TyVarBinder] -> TcThetaType -> PredType
             -> TcS (StopOrContinue Ct)
 solveForAll ev tv_bndrs theta pred
   | isWanted ev  -- See Note [Solving a Wanted forall-constraint]
-  = do { given_ev_vars <- mapM newEvVar theta
-       ; let skol_info = QuantCtxtSkol
+  = do { let skol_info = QuantCtxtSkol
+             empty_subst = mkEmptyTCvSubst $ mkInScopeSet $
+                           tyCoVarsOfTypes (pred:theta) `delVarSetList` tvs
+       ; (subst, skol_tvs) <- tcInstSkolTyVarsX empty_subst tvs
+       ; given_ev_vars <- mapM newEvVar (substTheta subst theta)
+
        ; (implic, ev_binds, w_id)
-             <- buildImplication skol_info tvs given_ev_vars $
-                do { wanted_ev <- newWantedEvVarNC loc pred
+             <- buildImplication skol_info skol_tvs given_ev_vars $
+                do { wanted_ev <- newWantedEvVarNC loc $
+                                  substTy subst pred
                    ; return ([wanted_ev], ctEvEvId wanted_ev) }
 
-      ; traceTcS "solveForAll: wanted" (ppr implic)
+      ; traceTcS "solveForAll: wanted" (ppr tvs $$ ppr implic)
       ; updWorkListTcS (extendWorkListImplic implic)
       ; setWantedEvBind (ctEvEvId ev) $
-        EvFun { et_tvs = tvs, et_given = given_ev_vars
+        EvFun { et_tvs = skol_tvs, et_given = given_ev_vars
               , et_binds = ev_binds, et_body = w_id }
       ; stopWith ev "Wanted forall-constraint" }
 
@@ -634,12 +640,12 @@ solveForAll ev tv_bndrs theta pred
 Solving a wanted forall constraints
   [W] df :: forall ab. (Eq a, Ord b) => C x a b
 is deligtfully easy.   Just build an implication constraint
-    forall ab. (g1::Eq a, g2::Ord b) => [W] d :: C x a 
+    forall ab. (g1::Eq a, g2::Ord b) => [W] d :: C x a
 and discharge df thus:
     df = /\ab. \g1 g2. let <binds> in d
 where <binds> is filled in by solving the implication constraint.
 All the machinery is to hand; there is little to do.
-    
+
 Note [Solving a Given forall-constraint]
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 For a Given constraint

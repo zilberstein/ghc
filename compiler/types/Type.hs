@@ -1770,7 +1770,7 @@ classifyPredType ev_ty = case splitTyConApp_maybe ev_ty of
       -> ForAllPred tvs theta pred
 
       | otherwise
-      -> IrredPred ev_ty      
+      -> IrredPred ev_ty
 
 getClassPredTys :: HasDebugCallStack => PredType -> (Class, [Type])
 getClassPredTys ty = case getClassPredTys_maybe ty of

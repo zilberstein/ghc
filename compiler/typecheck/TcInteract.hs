@@ -18,8 +18,7 @@ import VarSet
 import Type
 import Kind( isConstraintKind )
 import InstEnv( DFunInstType, lookupInstEnv
-              , instanceDFunId, isOverlappable
-              , instanceBindFun )
+              , instanceDFunId, isOverlappable )
 import CoAxiom( sfInteractTop, sfInteractInert )
 
 import TcMType (newMetaTyVars)
@@ -45,7 +44,7 @@ import FieldLabel
 import FunDeps
 import FamInst
 import FamInstEnv
-import Unify ( tcUnifyTyWithTFs, ruleMatchTyKiX, tcUnifyTys )
+import Unify ( tcUnifyTyWithTFs, ruleMatchTyKiX )
 
 import TcEvidence
 import MkCore ( mkStringExprFS, mkNaturalExpr )
@@ -2336,7 +2335,7 @@ matchClassInst dflags inerts clas tys loc
   = do { traceTcS "matchClassInst" $ text "pred =" <+> ppr pred <+> char '{'
        ; local_res <- matchLocalInst pred loc
        ; case local_res of
-           OneInst {} -> 
+           OneInst {} ->
                 do { traceTcS "} matchClassInst local match" $ ppr local_res
                    ; return local_res }
 
@@ -2518,31 +2517,30 @@ matchLocalInst pred loc
            _ -> return NotSure }
   where
     pred_tv_set = tyCoVarsOfType pred
-    
+
     match_local_inst :: [QCInst]
                      -> ( [(CtEvidence, [DFunInstType])]
                         , Bool )      -- True <=> Some unify but do not match
     match_local_inst []
       = ([], False)
-    match_local_inst (QCI { qci_tvs = qtvs, qci_pred = qpred
-                          , qci_ev = ev }
+    match_local_inst (qci@(QCI { qci_tvs = qtvs, qci_pred = qpred
+                               , qci_ev = ev })
                      : qcis)
-      | let qtv_set = mkVarSet qtvs
-            in_scope = mkInScopeSet (qtv_set `unionVarSet` pred_tv_set)
+      | let in_scope = mkInScopeSet (qtv_set `unionVarSet` pred_tv_set)
       , Just tv_subst <- ruleMatchTyKiX qtv_set (mkRnEnv2 in_scope)
                                         emptyTvSubstEnv qpred pred
-      = let match = (ev, map (lookupVarEnv tv_subst) qtvs)
-        in (match:matches, unif)
+      , let match = (ev, map (lookupVarEnv tv_subst) qtvs)
+      = (match:matches, unif)
 
       | otherwise
-      = let this_unif = ASSERT2( disjointVarSet (mkVarSet qtvs)
-                                                (tyCoVarsOfType pred)
-                               , ppr ev $$ ppr qtvs $$ ppr qpred $$ ppr pred )
-                        -- Unification relies on the
-                        -- quantified variables being fresh
-                        isJust (tcUnifyTys instanceBindFun [qpred] [pred])
-        in (matches, unif || this_unif)
+      = ASSERT2( disjointVarSet qtv_set (tyCoVarsOfType pred)
+               , ppr qci $$ ppr pred )
+            -- ASSERT: unification relies on the
+            -- quantified variables being fresh
+        (matches, unif || this_unif)
       where
+        qtv_set = mkVarSet qtvs
+        this_unif = mightMatchLater qpred (ctEvLoc ev) pred loc
         (matches, unif) = match_local_inst qcis
 
 matchInstEnv :: DynFlags -> Bool -> Class -> [Type] -> CtLoc -> TcS LookupInstResult

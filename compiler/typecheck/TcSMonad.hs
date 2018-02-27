@@ -21,7 +21,7 @@ module TcSMonad (
     runTcPluginTcS, addUsedGRE, addUsedGREs,
 
     QCInst(..),
-    
+
     -- Tracing etc
     panicTcS, traceTcS,
     traceFireTcS, bumpStepCountTcS, csTraceTcS,
@@ -54,7 +54,7 @@ module TcSMonad (
     getInertEqs, getInertCans, getInertGivens,
     getInertInsols,
     getTcSInerts, setTcSInerts,
-    matchableGivens, prohibitedSuperClassSolve,
+    matchableGivens, prohibitedSuperClassSolve, mightMatchLater,
     getUnsolvedInerts,
     removeInertCts, getPendingScDicts,
     addInertCan, addInertEq, insertFunEq, addInertForAll,
@@ -1982,7 +1982,7 @@ getNoGivenEqs tclvl skol_tvs
 -- Given might overlap with an instance. See Note [Instance and Given overlap]
 -- in TcInteract.
 matchableGivens :: CtLoc -> PredType -> InertSet -> Cts
-matchableGivens loc_w pred (IS { inert_cans = inert_cans })
+matchableGivens loc_w pred_w (IS { inert_cans = inert_cans })
   = filterBag matchable_given all_relevant_givens
   where
     -- just look in class constraints and irreds. matchableGivens does get called
@@ -1991,7 +1991,7 @@ matchableGivens loc_w pred (IS { inert_cans = inert_cans })
     -- non-canonical -- that is, irreducible -- equalities.
     all_relevant_givens :: Cts
     all_relevant_givens
-      | Just (clas, _) <- getClassPredTys_maybe pred
+      | Just (clas, _) <- getClassPredTys_maybe pred_w
       = findDictsByClass (inert_dicts inert_cans) clas
         `unionBags` inert_irreds inert_cans
       | otherwise
@@ -1999,16 +1999,17 @@ matchableGivens loc_w pred (IS { inert_cans = inert_cans })
 
     matchable_given :: Ct -> Bool
     matchable_given ct
-      | CtGiven { ctev_loc = loc_g } <- ctev
-      , Just _ <- tcUnifyTys bind_meta_tv [ctEvPred ctev] [pred]
-      , not (prohibitedSuperClassSolve loc_g loc_w)
-      = True
+      | CtGiven { ctev_loc = loc_g, ctev_pred = pred_g } <- ctEvidence ct
+      = mightMatchLater pred_g loc_g pred_w loc_w
 
       | otherwise
       = False
-      where
-        ctev = cc_ev ct
 
+mightMatchLater :: TcPredType -> CtLoc -> TcPredType -> CtLoc -> Bool
+mightMatchLater given_pred given_loc wanted_pred wanted_loc
+  =  not (prohibitedSuperClassSolve given_loc wanted_loc)
+  && isJust (tcUnifyTys bind_meta_tv [given_pred] [wanted_pred])
+  where
     bind_meta_tv :: TcTyVar -> BindFlag
     -- Any meta tyvar may be unified later, so we treat it as
     -- bindable when unifying with givens. That ensures that we

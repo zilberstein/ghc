@@ -437,7 +437,8 @@ rankZeroMonoType, tyConArgMonoType, synArgMonoType, constraintMonoType :: Rank
 rankZeroMonoType   = MonoType (text "Perhaps you intended to use RankNTypes or Rank2Types")
 tyConArgMonoType   = MonoType (text "GHC doesn't yet support impredicative polymorphism")
 synArgMonoType     = MonoType (text "Perhaps you intended to use LiberalTypeSynonyms")
-constraintMonoType = MonoType (text "A constraint must be a monotype")
+constraintMonoType = MonoType (vcat [ text "A constraint must be a monotype"
+                                    , text "Perhpas you intended to use QuantifiedConstraints" ])
 
 funArgResRank :: Rank -> (Rank, Rank)             -- Function argument and result
 funArgResRank (LimitedRank _ arg_rank) = (arg_rank, LimitedRank (forAllAllowed arg_rank) arg_rank)

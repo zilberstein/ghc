@@ -371,10 +371,14 @@ instDFunType :: DFunId -> [DFunInstType]
                     , TcThetaType ) -- instantiated constraint
 -- See Note [DFunInstType: instantiating types] in InstEnv
 instDFunType dfun_id dfun_inst_tys
-  = do { (subst, inst_tys) <- go emptyTCvSubst dfun_tvs dfun_inst_tys
+  = do { (subst, inst_tys) <- go empty_subst dfun_tvs dfun_inst_tys
        ; return (inst_tys, substTheta subst dfun_theta) }
   where
-    (dfun_tvs, dfun_theta, _) = tcSplitSigmaTy (idType dfun_id)
+    dfun_ty = idType dfun_id
+    (dfun_tvs, dfun_theta, _) = tcSplitSigmaTy dfun_ty
+    empty_subst = mkEmptyTCvSubst (mkInScopeSet (tyCoVarsOfType dfun_ty))
+                  -- With quantified constraints, the
+                  -- type of a dfun may not be closed
 
     go :: TCvSubst -> [TyVar] -> [DFunInstType] -> TcM (TCvSubst, [TcType])
     go subst [] [] = return (subst, [])
