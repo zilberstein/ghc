@@ -1711,7 +1711,7 @@ tcSplitDFunTy :: Type -> ([TyVar], [Type], Class, [Type])
 --     df :: forall m. (forall b. Eq b => Eq (m b)) -> C m
 --
 -- Also NB splitFunTys, not tcSplitFunTys;
--- the latter  specifically stops at PredTy arguments,
+-- the latter specifically stops at PredTy arguments,
 -- and we don't want to do that here
 tcSplitDFunTy ty
   = case tcSplitForAllTys ty   of { (tvs, rho)    ->

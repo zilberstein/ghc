@@ -203,11 +203,11 @@ cloneWC wc@(WC { wc_simple = simples, wc_impl = implics })
            ; return (implic { ic_wanted = inner_wanted' }) }
 
 -- | Emits a new Wanted. Deals with both equalities and non-equalities.
-emitWanted :: CtOrigin -> TcPredType -> TcM EvExpr
+emitWanted :: CtOrigin -> TcPredType -> TcM EvTerm
 emitWanted origin pty
   = do { ev <- newWanted origin Nothing pty
        ; emitSimple $ mkNonCanonical ev
-       ; return $ ctEvExpr ev }
+       ; return $ ctEvTerm ev }
 
 -- | Emits a new equality constraint
 emitWantedEq :: CtOrigin -> TypeOrKind -> Role -> TcType -> TcType -> TcM Coercion
@@ -1448,7 +1448,7 @@ zonkCt ct
   = ASSERT( not (isCFunEqCan ct) )
   -- We do not expect to see any CFunEqCans, because zonkCt is only called on
   -- unflattened constraints.
-    do { fl' <- zonkCtEvidence (cc_ev ct)
+    do { fl' <- zonkCtEvidence (ctEvidence ct)
        ; return (mkNonCanonical fl') }
 
 zonkCtEvidence :: CtEvidence -> TcM CtEvidence

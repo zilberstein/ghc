@@ -23,7 +23,7 @@ module TcEvidence (
   evId, evCoercion, evCast, evDFunApp,  evSelector,
   mkEvCast, evVarsOfTerm, mkEvScSelectors, evTypeable,
 
-  evTermCoercion,
+  evTermCoercion, evTermCoercion_maybe,
   EvCallStack(..),
   EvTypeable(..),
 
@@ -315,8 +315,8 @@ mkWpCastN co
 mkWpTyApps :: [Type] -> HsWrapper
 mkWpTyApps tys = mk_co_app_fn WpTyApp tys
 
-mkWpEvApps :: [EvExpr] -> HsWrapper
-mkWpEvApps args = mk_co_app_fn WpEvApp (map EvExpr args)
+mkWpEvApps :: [EvTerm] -> HsWrapper
+mkWpEvApps args = mk_co_app_fn WpEvApp args
 
 mkWpEvVarApps :: [EvVar] -> HsWrapper
 mkWpEvVarApps vs = mk_co_app_fn WpEvApp (map (EvExpr . evId) vs)
@@ -475,8 +475,8 @@ mkWantedEvBind :: EvVar -> EvTerm -> EvBind
 mkWantedEvBind ev tm = EvBind { eb_is_given = False, eb_lhs = ev, eb_rhs = tm }
 
 -- EvTypeable are never given, so we can work with EvExpr here instead of EvTerm
-mkGivenEvBind :: EvVar -> EvExpr -> EvBind
-mkGivenEvBind ev tm = EvBind { eb_is_given = True, eb_lhs = ev, eb_rhs = EvExpr tm }
+mkGivenEvBind :: EvVar -> EvTerm -> EvBind
+mkGivenEvBind ev tm = EvBind { eb_is_given = True, eb_lhs = ev, eb_rhs = tm }
 
 
 -- An EvTerm is, conceptually, a CoreExpr that implements the constraint.
@@ -488,10 +488,12 @@ data EvTerm
 
   | EvTypeable Type EvTypeable   -- Dictionary for (Typeable ty)
 
-  | EvFun { et_tvs   :: [TyVar]   -- /\as \ds. let binds in v
-          , et_given :: [EvVar]
-          , et_binds :: TcEvBinds
-          , et_body  :: EvVar }
+  | EvFun     -- /\as \ds. let binds in v
+      { et_tvs   :: [TyVar]
+      , et_given :: [EvVar]
+      , et_binds :: TcEvBinds -- This field is why we need an EvFun
+                              -- constructor, and can't just use EvExpr
+      , et_body  :: EvVar }
 
   deriving Data.Data
 
@@ -506,17 +508,17 @@ evId = Var
 
 -- coercion bindings
 -- See Note [Coercion evidence terms]
-evCoercion :: TcCoercion -> EvExpr
-evCoercion = Coercion
+evCoercion :: TcCoercion -> EvTerm
+evCoercion co = EvExpr (Coercion co)
 
 -- | d |> co
-evCast :: EvExpr -> TcCoercion -> EvExpr
-evCast et tc | isReflCo tc = et
-             | otherwise   = Cast et tc
+evCast :: EvExpr -> TcCoercion -> EvTerm
+evCast et tc | isReflCo tc = EvExpr et
+             | otherwise   = EvExpr (Cast et tc)
 
 -- Dictionary instance application
-evDFunApp :: DFunId -> [Type] -> [EvExpr] -> EvExpr
-evDFunApp df tys ets = Var df `mkTyApps` tys `mkApps` ets
+evDFunApp :: DFunId -> [Type] -> [EvExpr] -> EvTerm
+evDFunApp df tys ets = EvExpr $ Var df `mkTyApps` tys `mkApps` ets
 
 -- Selector id plus the types at which it
 -- should be instantiated, used for HasField
@@ -742,17 +744,23 @@ Important Details:
 
 -}
 
-mkEvCast :: EvExpr -> TcCoercion -> EvExpr
+mkEvCast :: EvExpr -> TcCoercion -> EvTerm
 mkEvCast ev lco
-  | ASSERT2(tcCoercionRole lco == Representational, (vcat [text "Coercion of wrong role passed to mkEvCast:", ppr ev, ppr lco]))
-    isTcReflCo lco = ev
+  | ASSERT2( tcCoercionRole lco == Representational
+           , (vcat [text "Coercion of wrong role passed to mkEvCast:", ppr ev, ppr lco]))
+    isTcReflCo lco = EvExpr ev
   | otherwise      = evCast ev lco
 
-mkEvScSelectors :: EvExpr -> Class -> [TcType] -> [(TcPredType, EvExpr)]
-mkEvScSelectors ev cls tys
+
+mkEvScSelectors         -- Assume   class (..., D ty, ...) => C a b
+  :: Class -> [TcType]  -- C ty1 ty2
+  -> [(TcPredType,      -- D ty[ty1/a,ty2/b]
+       EvExpr)          -- :: C ty1 ty2 -> D ty[ty1/a,ty2/b]
+     ]
+mkEvScSelectors cls tys
    = zipWith mk_pr (immSuperClasses cls tys) [0..]
   where
-    mk_pr pred i = (pred, Var sc_sel_id `mkTyApps` tys `App` ev)
+    mk_pr pred i = (pred, Var sc_sel_id `mkTyApps` tys)
       where
         sc_sel_id  = classSCSelId cls i -- Zero-indexed
 
@@ -763,13 +771,25 @@ isEmptyTcEvBinds :: TcEvBinds -> Bool
 isEmptyTcEvBinds (EvBinds b)    = isEmptyBag b
 isEmptyTcEvBinds (TcEvBinds {}) = panic "isEmptyTcEvBinds"
 
-evTermCoercion :: EvTerm -> TcCoercion
+evTermCoercion_maybe :: EvTerm -> Maybe TcCoercion
 -- Applied only to EvTerms of type (s~t)
 -- See Note [Coercion evidence terms]
-evTermCoercion (EvExpr (Var v))       = mkCoVarCo v
-evTermCoercion (EvExpr (Coercion co)) = co
-evTermCoercion (EvExpr (Cast tm co))  = mkCoCast (evTermCoercion (EvExpr tm)) co
-evTermCoercion tm                     = pprPanic "evTermCoercion" (ppr tm)
+evTermCoercion_maybe (EvExpr e)
+  = go e
+  where
+    go :: EvExpr -> Maybe TcCoercion
+    go (Var v)       = return (mkCoVarCo v)
+    go (Coercion co) = return co
+    go (Cast tm co)  = do { co' <- go tm
+                          ; return (mkCoCast co' co) }
+    go _             = Nothing
+
+evTermCoercion_maybe _ = Nothing
+    
+evTermCoercion :: EvTerm -> TcCoercion
+evTermCoercion tm = case evTermCoercion_maybe tm of
+                      Just co -> co
+                      Nothing -> pprPanic "evTermCoercion" (ppr tm)
 
 
 {- *********************************************************************

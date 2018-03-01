@@ -64,6 +64,9 @@ module TcRnTypes(
         TcIdSigInst(..), TcPatSynInfo(..),
         isPartialSig, hasCompleteSig,
 
+        -- QCInst
+        QCInst(..), isPendingScInst,
+
         -- Canonical constraints
         Xi, Ct(..), Cts, emptyCts, andCts, andManyCts, pprCts,
         singleCt, listToCts, ctsElts, consCts, snocCts, extendCtsList,
@@ -78,7 +81,7 @@ module TcRnTypes(
         mkNonCanonical, mkNonCanonicalCt, mkGivens,
         mkIrredCt, mkInsolubleCt,
         ctEvPred, ctEvLoc, ctEvOrigin, ctEvEqRel,
-        ctEvExpr, ctEvCoercion, ctEvEvId,
+        ctEvExpr, ctEvTerm, ctEvCoercion, ctEvEvId,
         tyCoVarsOfCt, tyCoVarsOfCts,
         tyCoVarsOfCtList, tyCoVarsOfCtsList,
 
@@ -1694,6 +1697,26 @@ data Ct
       cc_hole :: Hole
     }
 
+  | CQuantCan QCInst       -- A quantified constraint
+      -- NB: I expect to make more of the cases in Ct
+      --     look like this, with the payload in an
+      --     auxiliary type
+
+------------
+data QCInst  -- A much simplified version of ClsInst
+             -- See Note [Quantified constraints] in TcCanonical
+  = QCI { qci_ev   :: CtEvidence -- Always of type forall tvs. context => ty
+                                 -- Always Given
+        , qci_tvs  :: [TcTyVar]  -- The tvs
+        , qci_pred :: TcPredType -- The ty
+        , qci_pend_sc :: Bool    -- Same as cc_pend_sc flag in CDictCan
+                                 -- Invariant: True => qci_pred is a ClassPred
+    }
+
+instance Outputable QCInst where
+  ppr (QCI { qci_ev = ev }) = ppr ev
+
+------------
 -- | An expression or type hole
 data Hole = ExprHole UnboundVar
             -- ^ Either an out-of-scope variable or a "true" hole in an
@@ -1780,7 +1803,8 @@ mkGivens loc ev_ids
                                        , ctev_loc = loc })
 
 ctEvidence :: Ct -> CtEvidence
-ctEvidence = cc_ev
+ctEvidence (CQuantCan (QCI { qci_ev = ev })) = ev
+ctEvidence ct = cc_ev ct
 
 ctLoc :: Ct -> CtLoc
 ctLoc = ctEvLoc . ctEvidence
@@ -1793,7 +1817,7 @@ ctOrigin = ctLocOrigin . ctLoc
 
 ctPred :: Ct -> PredType
 -- See Note [Ct/evidence invariant]
-ctPred ct = ctEvPred (cc_ev ct)
+ctPred ct = ctEvPred (ctEvidence ct)
 
 ctEvId :: Ct -> EvVar
 -- The evidence Id for this Ct
@@ -1818,7 +1842,7 @@ ctEqRel :: Ct -> EqRel
 ctEqRel = ctEvEqRel . ctEvidence
 
 instance Outputable Ct where
-  ppr ct = ppr (cc_ev ct) <+> parens pp_sort
+  ppr ct = ppr (ctEvidence ct) <+> parens pp_sort
     where
       pp_sort = case ct of
          CTyEqCan {}      -> text "CTyEqCan"
@@ -1831,6 +1855,9 @@ instance Outputable Ct where
             | insol     -> text "CIrredCan(insol)"
             | otherwise -> text "CIrredCan(sol)"
          CHoleCan { cc_hole = hole } -> text "CHoleCan:" <+> ppr hole
+         CQuantCan (QCI { qci_pend_sc = pend_sc })
+            | pend_sc   -> text "CQuantCan(psc)"
+            | otherwise -> text "CQuantCan"
 
 {-
 ************************************************************************
@@ -1861,9 +1888,7 @@ tyCoFVsOfCt (CFunEqCan { cc_tyargs = tys, cc_fsk = fsk })
   = tyCoFVsOfTypes tys `unionFV` FV.unitFV fsk
                        `unionFV` tyCoFVsOfType (tyVarKind fsk)
 tyCoFVsOfCt (CDictCan { cc_tyargs = tys }) = tyCoFVsOfTypes tys
-tyCoFVsOfCt (CIrredCan { cc_ev = ev }) = tyCoFVsOfType (ctEvPred ev)
-tyCoFVsOfCt (CHoleCan { cc_ev = ev }) = tyCoFVsOfType (ctEvPred ev)
-tyCoFVsOfCt (CNonCanonical { cc_ev = ev }) = tyCoFVsOfType (ctEvPred ev)
+tyCoFVsOfCt ct = tyCoFVsOfType (ctPred ct)
 
 -- | Returns free variables of a bag of constraints as a non-deterministic
 -- set. See Note [Deterministic FV] in FV.
@@ -2038,13 +2063,13 @@ To distinguish these cases we use the CtOrigin.
 -}
 
 isWantedCt :: Ct -> Bool
-isWantedCt = isWanted . cc_ev
+isWantedCt = isWanted . ctEvidence
 
 isGivenCt :: Ct -> Bool
-isGivenCt = isGiven . cc_ev
+isGivenCt = isGiven . ctEvidence
 
 isDerivedCt :: Ct -> Bool
-isDerivedCt = isDerived . cc_ev
+isDerivedCt = isDerived . ctEvidence
 
 isCTyEqCan :: Ct -> Bool
 isCTyEqCan (CTyEqCan {})  = True
@@ -2139,10 +2164,17 @@ isUserTypeErrorCt ct = case getUserTypeErrorMsg ct of
                          _      -> False
 
 isPendingScDict :: Ct -> Maybe Ct
--- Says whether cc_pend_sc is True, AND if so flips the flag
+-- Says whether this is a CDictCan with cc_pend_sc is True,
+-- AND if so flips the flag
 isPendingScDict ct@(CDictCan { cc_pend_sc = True })
                   = Just (ct { cc_pend_sc = False })
 isPendingScDict _ = Nothing
+
+isPendingScInst :: QCInst -> Maybe QCInst
+-- Same as isPrendinScDict, but for QCInsts
+isPendingScInst qci@(QCI { qci_pend_sc = True })
+                  = Just (qci { qci_pend_sc = False })
+isPendingScInst _ = Nothing  
 
 setPendingScDict :: Ct -> Ct
 -- Set the cc_pend_sc flag to True
@@ -2680,8 +2712,12 @@ ctEvEqRel = predTypeEqRel . ctEvPred
 ctEvRole :: CtEvidence -> Role
 ctEvRole = eqRelRole . ctEvEqRel
 
+ctEvTerm :: CtEvidence -> EvTerm
+ctEvTerm ev = EvExpr (ctEvExpr ev)
+
 ctEvExpr :: CtEvidence -> EvExpr
-ctEvExpr ev@(CtWanted { ctev_dest = HoleDest _ }) = evCoercion $ ctEvCoercion ev
+ctEvExpr ev@(CtWanted { ctev_dest = HoleDest _ })
+            = Coercion $ ctEvCoercion ev
 ctEvExpr ev = evId (ctEvEvId ev)
 
 -- Always returns a coercion whose type is precisely ctev_pred of the CtEvidence.
@@ -2816,7 +2852,7 @@ ctFlavourRole (CFunEqCan { cc_ev = ev })
 ctFlavourRole (CHoleCan { cc_ev = ev })
   = (ctEvFlavour ev, NomEq)
 ctFlavourRole ct
-  = ctEvFlavourRole (cc_ev ct)
+  = ctEvFlavourRole (ctEvidence ct)
 
 {- Note [eqCanRewrite]
 ~~~~~~~~~~~~~~~~~~~~~~

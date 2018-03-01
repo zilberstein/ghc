@@ -691,11 +691,11 @@ interactIrred inerts workItem@(CIrredCan { cc_ev = ev_w, cc_insol = insoluble })
   = continueWith workItem
 
   where
-    swap_me :: SwapFlag -> CtEvidence -> EvExpr
+    swap_me :: SwapFlag -> CtEvidence -> EvTerm
     swap_me swap ev
       = case swap of
-           NotSwapped -> ctEvExpr ev
-           IsSwapped  -> evCoercion (mkTcSymCo (evTermCoercion (EvExpr (ctEvExpr ev))))
+           NotSwapped -> ctEvTerm ev
+           IsSwapped  -> evCoercion (mkTcSymCo (evTermCoercion (ctEvTerm ev)))
 
 interactIrred _ wi = pprPanic "interactIrred" (ppr wi)
 
@@ -991,7 +991,7 @@ interactDict inerts workItem@(CDictCan { cc_ev = ev_w, cc_class = cls, cc_tyargs
        ; try_inst_res <- shortCutSolver dflags ev_w ev_i
        ; case try_inst_res of
            Just evs -> do { flip mapM_ evs $ \ (ev_t, ct_ev, cls, typ) ->
-                               do { setWantedEvBind (ctEvEvId ct_ev) ev_t
+                               do { setEvBindIfWanted ct_ev ev_t
                                   ; addSolvedDict ct_ev cls typ }
                           ; stopWith ev_w "interactDict/solved from instance" }
 
@@ -1001,9 +1001,9 @@ interactDict inerts workItem@(CDictCan { cc_ev = ev_w, cc_class = cls, cc_tyargs
              { what_next <- solveOneFromTheOther ev_i ev_w
              ; traceTcS "lookupInertDict" (ppr what_next)
              ; case what_next of
-                 KeepInert -> do { setEvBindIfWanted ev_w (ctEvExpr ev_i)
+                 KeepInert -> do { setEvBindIfWanted ev_w (ctEvTerm ev_i)
                                  ; return $ Stop ev_w (text "Dict equal" <+> parens (ppr what_next)) }
-                 KeepWork  -> do { setEvBindIfWanted ev_i (ctEvExpr ev_w)
+                 KeepWork  -> do { setEvBindIfWanted ev_i (ctEvTerm ev_w)
                                  ; updInertDicts $ \ ds -> delDict ds cls tys
                                  ; continueWith workItem } } }
 
@@ -1565,10 +1565,10 @@ interactTyVarEq inerts workItem@(CTyEqCan { cc_tyvar = tv
        ; stopWith ev "Solved from inert" }
 
   | ReprEq <- eq_rel   -- We never solve representational
-  = unsolved_inert     -- equalities by unification
+  = continueWith workItem     -- equalities by unification
 
   | isGiven ev         -- See Note [Touchables and givens]
-  = unsolved_inert
+  = continueWith workItem
 
   | otherwise
   = do { tclvl <- getTcLevel
@@ -1577,18 +1577,7 @@ interactTyVarEq inerts workItem@(CTyEqCan { cc_tyvar = tv
                  ; n_kicked <- kickOutAfterUnification tv
                  ; return (Stop ev (text "Solved by unification" <+> ppr_kicked n_kicked)) }
 
-         else unsolved_inert }
-
-  where
-    unsolved_inert
-      = do { traceTcS "Can't solve tyvar equality"
-                (vcat [ text "LHS:" <+> ppr tv <+> dcolon <+> ppr (tyVarKind tv)
-                      , ppWhen (isMetaTyVar tv) $
-                        nest 4 (text "TcLevel of" <+> ppr tv
-                                <+> text "is" <+> ppr (metaTyVarTcLevel tv))
-                      , text "RHS:" <+> ppr rhs <+> dcolon <+> ppr (typeKind rhs) ])
-           ; addInertEq workItem
-           ; stopWith ev "Kept as inert" }
+         else continueWith workItem }
 
 interactTyVarEq _ wi = pprPanic "interactTyVarEq" (ppr wi)
 
@@ -1767,24 +1756,24 @@ topReactionsStage work_item
            CDictCan {}  -> do { inerts <- getTcSInerts
                               ; doTopReactDict inerts work_item }
            CFunEqCan {} -> doTopReactFunEq work_item
-           CIrredCan {} -> doTopReactIrred work_item
+           CIrredCan {} -> doTopReactOther work_item
+           CTyEqCan {}  -> doTopReactOther work_item
            _  -> -- Any other work item does not react with any top-level equations
                  continueWith work_item  }
 
 
 --------------------
-doTopReactIrred :: Ct -> TcS (StopOrContinue Ct)
-doTopReactIrred work_item@(CIrredCan { cc_ev = ev })
+doTopReactOther :: Ct -> TcS (StopOrContinue Ct)
+doTopReactOther work_item
   = do { -- Try local quantified constraints
          res <- matchLocalInst pred (ctEvLoc ev)
        ; case res of
            OneInst {} -> chooseInstance ev pred res
            _          -> continueWith work_item }
   where
+    ev = ctEvidence work_item
     pred = ctEvPred ev
 
-doTopReactIrred ct = pprPanic "doTopReactIrred" (ppr ct)
-  
 --------------------
 doTopReactFunEq :: Ct -> TcS (StopOrContinue Ct)
 doTopReactFunEq work_item@(CFunEqCan { cc_ev = old_ev, cc_fun = fam_tc
@@ -1987,7 +1976,7 @@ dischargeFmv :: CtEvidence -> TcTyVar -> TcCoercion -> TcType -> TcS ()
 -- Does not evaluate 'co' if 'ev' is Derived
 dischargeFmv ev@(CtWanted { ctev_dest = dest }) fmv co xi
   = ASSERT2( not (fmv `elemVarSet` tyCoVarsOfType xi), ppr ev $$ ppr fmv $$ ppr xi )
-    do { setWantedEvTerm dest (EvExpr (evCoercion co))
+    do { setWantedEvTerm dest (evCoercion co)
        ; unflattenFmv fmv xi
        ; n_kicked <- kickOutAfterUnification fmv
        ; traceTcS "dischargeFmv" (ppr fmv <+> equals <+> ppr xi $$ ppr_kicked n_kicked) }
@@ -2204,7 +2193,7 @@ doTopReactDict inerts work_item@(CDictCan { cc_ev = ev, cc_class = cls
        ; continueWith work_item }
 
   | Just solved_ev <- lookupSolvedDict inerts dict_loc cls xis   -- Cached
-  = do { setEvBindIfWanted ev (ctEvExpr solved_ev)
+  = do { setEvBindIfWanted ev (ctEvTerm solved_ev)
        ; stopWith ev "Dict/Top (cached)" }
 
   | otherwise  -- Wanted or Derived, but not cached
@@ -2269,7 +2258,7 @@ chooseInstance ev pred
       -- Precondition: evidence term matches the predicate workItem
      finish_wanted theta mk_ev
         = do { evc_vars <- mapM (newWanted deeper_loc) theta
-             ; setWantedEvBind (ctEvEvId ev) (mk_ev (map getEvExpr evc_vars))
+             ; setEvBindIfWanted ev (mk_ev (map getEvExpr evc_vars))
              ; emitWorkNC (freshGoals evc_vars)
              ; stopWith ev "Dict/Top (solved wanted)" }
 
@@ -2593,10 +2582,12 @@ match_one :: TcPredType -> CtLoc -> SafeOverlapping
           -> DFunId -> [DFunInstType] -> TcS LookupInstResult
              -- See Note [DFunInstType: instantiating types] in InstEnv
 match_one pred loc so dfun_id mb_inst_tys
-  = do { checkWellStagedDFun pred dfun_id loc
+  = do { traceTcS "match_one" (ppr dfun_id $$ ppr mb_inst_tys)
+       ; checkWellStagedDFun pred dfun_id loc
        ; (tys, theta) <- instDFunType dfun_id mb_inst_tys
+       ; traceTcS "match_one 2" (ppr dfun_id $$ ppr tys $$ ppr theta)
        ; return $ OneInst { lir_new_theta = theta
-                          , lir_mk_ev     = EvExpr . evDFunApp dfun_id tys
+                          , lir_mk_ev     = evDFunApp dfun_id tys
                           , lir_safe_over = so } }
 
 
@@ -2614,7 +2605,7 @@ matchCTuple clas tys   -- (isCTupleClass clas) holds
             -- The dfun *is* the data constructor!
   where
      data_con = tyConSingleDataCon (classTyCon clas)
-     tuple_ev = EvExpr . evDFunApp (dataConWrapId data_con) tys
+     tuple_ev = evDFunApp (dataConWrapId data_con) tys
 
 {- ********************************************************************
 *                                                                     *
@@ -2706,7 +2697,7 @@ makeLitDict clas ty et
                       $ idType meth         -- forall n. KnownNat n => SNat n
     , Just (_, co_rep) <- tcInstNewTyCon_maybe tcRep [ty]
           -- SNat n ~ Integer
-    , let ev_tm = EvExpr $ mkEvCast et (mkTcSymCo (mkTcTransCo co_dict co_rep))
+    , let ev_tm = mkEvCast et (mkTcSymCo (mkTcTransCo co_dict co_rep))
     = return $ OneInst { lir_new_theta = []
                        , lir_mk_ev     = \_ -> ev_tm
                        , lir_safe_over = True }
@@ -2849,14 +2840,14 @@ a TypeRep for them.  For qualified but not polymorphic types, like
 matchLiftedEquality :: [Type] -> TcS LookupInstResult
 matchLiftedEquality args
   = return (OneInst { lir_new_theta = [ mkTyConApp eqPrimTyCon args ]
-                    , lir_mk_ev     = EvExpr . evDFunApp (dataConWrapId heqDataCon) args
+                    , lir_mk_ev     = evDFunApp (dataConWrapId heqDataCon) args
                     , lir_safe_over = True })
 
 -- See also Note [The equality types story] in TysPrim
 matchLiftedCoercible :: [Type] -> TcS LookupInstResult
 matchLiftedCoercible args@[k, t1, t2]
   = return (OneInst { lir_new_theta = [ mkTyConApp eqReprPrimTyCon args' ]
-                    , lir_mk_ev     = EvExpr . evDFunApp (dataConWrapId coercibleDataCon)
+                    , lir_mk_ev     = evDFunApp (dataConWrapId coercibleDataCon)
                                                 args
                     , lir_safe_over = True })
   where
@@ -2958,7 +2949,7 @@ matchHasField dflags short_cut clas tys loc
                          -- Use the equality proof to cast the selector Id to
                          -- type (r -> a), then use the newtype coercion to cast
                          -- it to a HasField dictionary.
-                         mk_ev (ev1:evs) = EvExpr $ evSelector sel_id tvs evs `evCast` co
+                         mk_ev (ev1:evs) = evSelector sel_id tvs evs `evCast` co
                            where
                              co = mkTcSubCo (evTermCoercion (EvExpr ev1))
                                       `mkTcTransCo` mkTcSymCo co2

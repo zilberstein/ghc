@@ -35,8 +35,8 @@ module TcSMonad (
     newWanted, newWantedEvVar, newWantedNC, newWantedEvVarNC, newDerivedNC,
     newBoundEvVarId,
     unifyTyVar, unflattenFmv, reportUnifications,
-    setEvBind, setWantedEq, setEqIfWanted,
-    setWantedEvTerm, setWantedEvBind, setEvBindIfWanted,
+    setEvBind, setWantedEq,
+    setWantedEvTerm, setEvBindIfWanted,
     newEvVar, newGivenEvVar, newGivenEvVars,
     emitNewDerived, emitNewDeriveds, emitNewDerivedEq,
     checkReductionDepth,
@@ -57,7 +57,7 @@ module TcSMonad (
     matchableGivens, prohibitedSuperClassSolve, mightMatchLater,
     getUnsolvedInerts,
     removeInertCts, getPendingScDicts,
-    addInertCan, addInertEq, insertFunEq, addInertForAll,
+    addInertCan, insertFunEq, addInertForAll,
     emitWorkNC, emitWork,
     isImprovable,
 
@@ -136,6 +136,7 @@ import Kind
 import TcType
 import DynFlags
 import Type
+import TyCoRep( coHoleCoVar )
 import Coercion
 import Unify
 
@@ -167,7 +168,7 @@ import Control.Monad
 import qualified Control.Monad.Fail as MonadFail
 import MonadUtils
 import Data.IORef
-import Data.List ( foldl', partition )
+import Data.List ( foldl', partition, mapAccumL )
 
 #if defined(DEBUG)
 import Digraph
@@ -666,17 +667,6 @@ data InertCans   -- See Note [Detailed InertCans Invariants] for more
 type InertEqs    = DTyVarEnv EqualCtList
 type EqualCtList = [Ct]  -- See Note [EqualCtList invariants]
 
-data QCInst  -- A much simplified version of ClsInst
-             -- See Note [Quantified constraints] in TcCanonical
-  = QCI { qci_ev   :: CtEvidence -- Always of type forall tvs. context => ty
-                                 -- Always Given
-        , qci_tvs  :: [TcTyVar]  -- The tvs
-        , qci_pred :: TcPredType -- The ty
-    }
-
-instance Outputable QCInst where
-  ppr (QCI { qci_ev = ev }) = ppr ev
-              
 {- Note [Detailed InertCans Invariants]
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 The InertCans represents a collection of constraints with the following properties:
@@ -1406,13 +1396,11 @@ equalities arising from injectivity.
 *                                                                      *
 ********************************************************************* -}
 
-addInertForAll :: CtEvidence -> [TyVar] -> TcPredType -> TcS ()
+addInertForAll :: QCInst -> TcS ()
 -- Add a local Given instance, typically arising from a type signature
-addInertForAll ev tvs pred
+addInertForAll qci
   = updInertCans $ \ics ->
     ics { inert_insts = qci : inert_insts ics }
-  where
-    qci = QCI { qci_ev = ev, qci_tvs = tvs, qci_pred = pred }
 
 {- Note [Local instances and incoherence]
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -1481,42 +1469,36 @@ So in kickOutRewritable we look at all the tyvars of the
 CFunEqCan, including the fsk.
 -}
 
-addInertEq :: Ct -> TcS ()
--- This is a key function, because of the kick-out stuff
+addInertCan :: Ct -> TcS ()  -- Constraints *other than* equalities
 -- Precondition: item /is/ canonical
 -- See Note [Adding an equality to the InertCans]
-addInertEq ct
-  = do { traceTcS "addInertEq {" $
-         text "Adding new inert equality:" <+> ppr ct
-
-       ; ics <- getInertCans
-
-       ; ct@(CTyEqCan { cc_tyvar = tv, cc_ev = ev, cc_eq_rel = eq_rel })
-             <- maybeEmitShadow ics ct
-
-       ; (_, ics1) <- kickOutRewritable (ctEvFlavour ev, eq_rel) tv ics
-
-       ; let ics2 = ics1 { inert_eqs   = addTyEq (inert_eqs ics1) tv ct
-                         , inert_count = bumpUnsolvedCount ev (inert_count ics1) }
-       ; setInertCans ics2
-
-       ; traceTcS "addInertEq }" $ empty }
-
---------------
-addInertCan :: Ct -> TcS ()  -- Constraints *other than* equalities
 addInertCan ct
   = do { traceTcS "insertInertCan {" $
-         text "Trying to insert new non-eq inert item:" <+> ppr ct
+         text "Trying to insert new inert item:" <+> ppr ct
 
        ; ics <- getInertCans
-       ; ct <- maybeEmitShadow ics ct
+       ; ct  <- maybeEmitShadow ics ct
+       ; ics <- maybeKickOut ics ct
        ; setInertCans (add_item ics ct)
 
        ; traceTcS "addInertCan }" $ empty }
 
+maybeKickOut :: InertCans -> Ct -> TcS InertCans
+-- For a CTyEqCan, kick out any inert that can be rewritten by the CTyEqCan
+maybeKickOut ics ct
+  | CTyEqCan { cc_tyvar = tv, cc_ev = ev, cc_eq_rel = eq_rel } <- ct
+  = do { (_, ics') <- kickOutRewritable (ctEvFlavour ev, eq_rel) tv ics
+       ; return ics' }
+  | otherwise
+  = return ics
+
 add_item :: InertCans -> Ct -> InertCans
 add_item ics item@(CFunEqCan { cc_fun = tc, cc_tyargs = tys })
   = ics { inert_funeqs = insertFunEq (inert_funeqs ics) tc tys item }
+
+add_item ics item@(CTyEqCan { cc_tyvar = tv, cc_ev = ev })
+  = ics { inert_eqs   = addTyEq (inert_eqs ics) tv item
+        , inert_count = bumpUnsolvedCount ev (inert_count ics) }
 
 add_item ics@(IC { inert_irreds = irreds, inert_count = count })
          item@(CIrredCan { cc_ev = ev, cc_insol = insoluble })
@@ -1531,8 +1513,7 @@ add_item ics item@(CDictCan { cc_ev = ev, cc_class = cls, cc_tyargs = tys })
 
 add_item _ item
   = pprPanic "upd_inert set: can't happen! Inserting " $
-    ppr item   -- CTyEqCan is dealt with by addInertEq
-               -- Can't be CNonCanonical, CHoleCan,
+    ppr item   -- Can't be CNonCanonical, CHoleCan,
                -- because they only land in inert_irreds
 
 bumpUnsolvedCount :: CtEvidence -> Int -> Int
@@ -1859,14 +1840,17 @@ getPendingScDicts :: TcS [Ct]
 -- Set the flag to False in the inert set, and return that Ct
 getPendingScDicts = updRetInertCans get_sc_dicts
   where
-    get_sc_dicts ic@(IC { inert_dicts = dicts })
-      = (sc_pend_dicts, ic')
+    get_sc_dicts ic@(IC { inert_dicts = dicts, inert_insts = insts })
+      = (sc_pend_insts ++ sc_pend_dicts, ic')
       where
-        ic' = ic { inert_dicts = foldr add dicts sc_pend_dicts }
+        ic' = ic { inert_dicts = foldr add dicts sc_pend_dicts
+                 , inert_insts = insts' }
 
         sc_pend_dicts :: [Ct]
         sc_pend_dicts = foldDicts get_pending dicts []
 
+        (sc_pend_insts, insts') = mapAccumL get_pending_inst [] insts
+ 
     get_pending :: Ct -> [Ct] -> [Ct]  -- Get dicts with cc_pend_sc = True
                                        -- but flipping the flag
     get_pending dict dicts
@@ -1877,6 +1861,13 @@ getPendingScDicts = updRetInertCans get_sc_dicts
     add ct@(CDictCan { cc_class = cls, cc_tyargs = tys }) dicts
         = addDict dicts cls tys ct
     add ct _ = pprPanic "getPendingScDicts" (ppr ct)
+
+    get_pending_inst :: [Ct] -> QCInst -> ([Ct], QCInst)
+    get_pending_inst cts qci
+       | Just qci' <- isPendingScInst qci
+       = (CQuantCan qci' : cts, qci')
+       | otherwise
+       = (cts, qci)
 
 getUnsolvedInerts :: TcS ( Bag Implication
                          , Cts     -- Tyvar eqs: a ~ ty
@@ -2118,6 +2109,7 @@ removeInertCt is ct =
     CTyEqCan  { cc_tyvar = x,  cc_rhs    = ty } ->
       is { inert_eqs    = delTyEq (inert_eqs is) x ty }
 
+    CQuantCan {}     -> panic "removeInertCt: CQuantCan"
     CIrredCan {}     -> panic "removeInertCt: CIrredEvCan"
     CNonCanonical {} -> panic "removeInertCt: CNonCanonical"
     CHoleCan {}      -> panic "removeInertCt: CHoleCan"
@@ -3115,28 +3107,25 @@ setWantedEq (HoleDest hole) co
        ; wrapTcS $ TcM.fillCoercionHole hole co }
 setWantedEq (EvVarDest ev) _ = pprPanic "setWantedEq" (ppr ev)
 
--- | Equalities only
-setEqIfWanted :: CtEvidence -> Coercion -> TcS ()
-setEqIfWanted (CtWanted { ctev_dest = dest }) co = setWantedEq dest co
-setEqIfWanted _ _ = return ()
-
--- | Good for equalities and non-equalities
+-- | Good for both equalities and non-equalities
 setWantedEvTerm :: TcEvDest -> EvTerm -> TcS ()
 setWantedEvTerm (HoleDest hole) tm
-  = do { let co = evTermCoercion tm
-       ; useVars (coVarsOfCo co)
+  | Just co <- evTermCoercion_maybe tm
+  = do { useVars (coVarsOfCo co)
        ; wrapTcS $ TcM.fillCoercionHole hole co }
-setWantedEvTerm (EvVarDest ev) tm = setWantedEvBind ev tm
+  | otherwise
+  = do { let co_var = coHoleCoVar hole
+       ; setEvBind (mkWantedEvBind co_var tm)
+       ; wrapTcS $ TcM.fillCoercionHole hole (mkTcCoVarCo co_var) }
 
-setWantedEvBind :: EvVar -> EvTerm -> TcS ()
-setWantedEvBind ev_id tm = setEvBind (mkWantedEvBind ev_id tm)
+setWantedEvTerm (EvVarDest ev_id) tm
+  = setEvBind (mkWantedEvBind ev_id tm)
 
-setEvBindIfWanted :: CtEvidence -> EvExpr -> TcS ()
+setEvBindIfWanted :: CtEvidence -> EvTerm -> TcS ()
 setEvBindIfWanted ev tm
   = case ev of
-      CtWanted { ctev_dest = dest }
-        -> setWantedEvTerm dest (EvExpr tm)
-      _ -> return ()
+      CtWanted { ctev_dest = dest } -> setWantedEvTerm dest tm
+      _                             -> return ()
 
 newTcEvBinds :: TcS EvBindsVar
 newTcEvBinds = wrapTcS TcM.newTcEvBinds
@@ -3144,7 +3133,7 @@ newTcEvBinds = wrapTcS TcM.newTcEvBinds
 newEvVar :: TcPredType -> TcS EvVar
 newEvVar pred = wrapTcS (TcM.newEvVar pred)
 
-newGivenEvVar :: CtLoc -> (TcPredType, EvExpr) -> TcS CtEvidence
+newGivenEvVar :: CtLoc -> (TcPredType, EvTerm) -> TcS CtEvidence
 -- Make a new variable of the given PredType,
 -- immediately bind it to the given term
 -- and return its CtEvidence
@@ -3155,13 +3144,13 @@ newGivenEvVar loc (pred, rhs)
 
 -- | Make a new 'Id' of the given type, bound (in the monad's EvBinds) to the
 -- given term
-newBoundEvVarId :: TcPredType -> EvExpr -> TcS EvVar
+newBoundEvVarId :: TcPredType -> EvTerm -> TcS EvVar
 newBoundEvVarId pred rhs
   = do { new_ev <- newEvVar pred
        ; setEvBind (mkGivenEvBind new_ev rhs)
        ; return new_ev }
 
-newGivenEvVars :: CtLoc -> [(TcPredType, EvExpr)] -> TcS [CtEvidence]
+newGivenEvVars :: CtLoc -> [(TcPredType, EvTerm)] -> TcS [CtEvidence]
 newGivenEvVars loc pts = mapM (newGivenEvVar loc) pts
 
 emitNewWantedEq :: CtLoc -> Role -> TcType -> TcType -> TcS Coercion

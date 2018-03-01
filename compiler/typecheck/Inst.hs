@@ -55,6 +55,7 @@ import TcType
 import HscTypes
 import Class( Class )
 import MkId( mkDictFunId )
+import CoreSyn( Expr(..) )  -- For the Coercion constructor
 import Id
 import Name
 import Var      ( EvVar, mkTyVar, tyVarName, TyVarBndr(..) )
@@ -352,6 +353,7 @@ instCallConstraints orig preds
        ; traceTc "instCallConstraints" (ppr evs)
        ; return (mkWpEvApps evs) }
   where
+    go :: TcPredType -> TcM EvTerm
     go pred
      | Just (Nominal, ty1, ty2) <- getEqPredTys_maybe pred -- Try short-cut #1
      = do  { co <- unifyType Nothing ty1 ty2
@@ -361,7 +363,7 @@ instCallConstraints orig preds
      | Just (tc, args@[_, _, ty1, ty2]) <- splitTyConApp_maybe pred
      , tc `hasKey` heqTyConKey
      = do { co <- unifyType Nothing ty1 ty2
-          ; return (evDFunApp (dataConWrapId heqDataCon) args [evCoercion co]) }
+          ; return (evDFunApp (dataConWrapId heqDataCon) args [Coercion co]) }
 
      | otherwise
      = emitWanted orig pred
