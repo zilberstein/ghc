@@ -69,7 +69,7 @@ import TcRnMonad  ( TcGblEnv, TcLclEnv, Ct, CtLoc, TcPluginM
                   , liftIO, traceTc )
 import TcMType    ( TcTyVar, TcType )
 import TcEnv      ( TcTyThing )
-import TcEvidence ( TcCoercion, CoercionHole
+import TcEvidence ( TcCoercion, CoercionHole, EvTerm(..)
                   , EvExpr, EvBind, mkGivenEvBind )
 import TcRnTypes  ( CtEvidence(..) )
 import Var        ( EvVar )
