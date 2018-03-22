@@ -6,6 +6,7 @@ test('T2893a', normal, compile, [''])
 test('T2893c', normal, compile, [''])
 test('T9123', normal, compile, [''])
 test('T14863', normal, compile, [''])
+test('T14961', normal, compile, [''])
 
 # Not yet
 # test('T9123a', normal, compile, [''])
